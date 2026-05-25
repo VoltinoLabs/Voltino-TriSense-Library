@@ -4,14 +4,28 @@
 #include <Wire.h>
 #include <Arduino.h>
 
-// BMP580 I2C address
-#define BMP580_DEFAULT_I2C_ADDR 0x46
+// BMP580 I2C addresses
+#define BMP580_PRIMARY_I2C_ADDR 0x46
+#define BMP580_SECONDARY_I2C_ADDR 0x47
 
 // Registers (from datasheet BST-BMP580-DS004-02)
 #define BMP580_CHIP_ID 0x01
+#define BMP580_DSP_CONFIG 0x35  // IIR Filter config register
 #define BMP580_OSR_CONFIG 0x36
 #define BMP580_ODR_CONFIG 0x37
 #define BMP580_TEMP_DATA_XLSB 0x1D  // Burst read start
+
+// IIR Filter coefficients
+enum BMP580_IIR {
+  BMP580_IIR_OFF = 0x00,
+  BMP580_IIR_1   = 0x01,
+  BMP580_IIR_3   = 0x02,
+  BMP580_IIR_7   = 0x03,
+  BMP580_IIR_15  = 0x04,
+  BMP580_IIR_31  = 0x05,
+  BMP580_IIR_63  = 0x06,
+  BMP580_IIR_127 = 0x07
+};
 
 // Oversampling rates (OSR)
 enum BMP580_OSR {
@@ -72,19 +86,35 @@ enum BMP580_Mode {
 class BMP580 {
  public:
   BMP580();
-  bool begin(uint8_t addr = BMP580_DEFAULT_I2C_ADDR);
+  bool begin(uint8_t addr = BMP580_PRIMARY_I2C_ADDR);
+  
+  void setI2CSpeed(uint32_t speed); // e.g., 100000, 400000, or 1000000 (Fast Mode Plus)
   void setOversampling(BMP580_OSR osr_p, BMP580_OSR osr_t);
   void setODR(BMP580_ODR odr);
   void setPowerMode(BMP580_Mode mode);
+  void setIIRFilter(BMP580_IIR iir_p, BMP580_IIR iir_t);
+  
   float readTemperature();
   float readPressure();
   float readAltitude(float seaLevelPressure = 101325.0f);
 
  private:
   uint8_t _i2cAddr;
+  
+  // Smart caching variables
+  float _cachedTemp = 0.0f;
+  float _cachedPress = 0.0f;
+  unsigned long _lastReadTimeUs = 0;
+  unsigned long _cacheTimeoutUs = 0;
+
+  // Internal helpers
   void writeRegister(uint8_t reg, uint8_t value);
   uint8_t readRegister(uint8_t reg);
   void readBurst(uint8_t reg, uint8_t* buffer, uint8_t length);
+  
+  // Cache and timing logic
+  void updateCache();
+  void updateTimeoutUs(BMP580_ODR odr);
 };
 
 #endif
