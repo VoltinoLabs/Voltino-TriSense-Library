@@ -3,21 +3,83 @@
 ICM42688P::ICM42688P() {
   _accelScaleFactor = 1.0f / 2048.0f; 
   _gyroScaleFactor = 1.0f / 16.4f;
+  _i2cAddr = ICM_ADDR_PRIMARY;
+  _fifoMode = FIFO_NONE;
+  _debug = false; 
+  _csPin = -1;
 }
 
-bool ICM42688P::begin(ICM_BUS busType, uint8_t pin, uint32_t freq) {
+void ICM42688P::setDebug(bool enable) {
+  _debug = enable;
+}
+
+bool ICM42688P::beginI2C(uint32_t freq, uint8_t i2cAddr, int8_t sdaPin, int8_t sclPin) {
+  return begin(BUS_I2C, -1, freq, i2cAddr, sclPin, sdaPin, -1);
+}
+
+bool ICM42688P::beginSPI(int8_t csPin, uint32_t freq, int8_t sckPin, int8_t misoPin, int8_t mosiPin) {
+  return begin(BUS_SPI, csPin, freq, ICM_ADDR_PRIMARY, sckPin, misoPin, mosiPin);
+}
+
+bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cAddr, int8_t sckSclPin, int8_t misoSdaPin, int8_t mosiPin) {
   _bus = busType;
-  _csPin = pin;
-  _spiFreq = freq;
+  _csPin = csPin;
+  _i2cAddr = i2cAddr;
+
+  #if defined(ESP32) || defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
+    uint32_t defaultSpiFreq = 12000000; 
+    uint32_t defaultI2cFreq = 400000;   
+    ICM_ODR defaultOdr = ODR_8KHZ;
+  #else
+    uint32_t defaultSpiFreq = 4000000;  
+    uint32_t defaultI2cFreq = 100000;   
+    ICM_ODR defaultOdr = ODR_500HZ;
+  #endif
+
+  _spiFreq = (freq == 0) ? ((_bus == BUS_SPI) ? defaultSpiFreq : defaultI2cFreq) : freq;
 
   if (_bus == BUS_SPI) {
-    pinMode(_csPin, OUTPUT);
-    digitalWrite(_csPin, HIGH);
-    SPI.begin();
+    if (_csPin != -1) {
+      pinMode(_csPin, OUTPUT);
+      digitalWrite(_csPin, HIGH);
+    }
+    
+    #if defined(ESP32)
+      if (sckSclPin != -1 && misoSdaPin != -1 && mosiPin != -1) {
+        SPI.begin(sckSclPin, misoSdaPin, mosiPin, _csPin);
+      } else {
+        SPI.begin();
+      }
+    #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
+      if (sckSclPin != -1 && misoSdaPin != -1 && mosiPin != -1) {
+        SPI.setSCK(sckSclPin);
+        SPI.setRX(misoSdaPin);
+        SPI.setTX(mosiPin);
+      }
+      SPI.begin();
+    #else
+      SPI.begin(); 
+    #endif
+
   } else {
-    // I2C Mód
+    #if defined(ESP32) 
+      if (sckSclPin != -1 && misoSdaPin != -1) {
+        Wire.setPins(misoSdaPin, sckSclPin); // SDA, SCL
+      }
+    #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
+      if (sckSclPin != -1 && misoSdaPin != -1) {
+        Wire.setSDA(misoSdaPin);
+        Wire.setSCL(sckSclPin);
+      }
+    #endif
+    
     Wire.begin();
-    Wire.setClock(400000); // 400 kHz Fast Mode
+    Wire.setClock(_spiFreq);
+
+    Wire.beginTransmission(_i2cAddr);
+    if (Wire.endTransmission() != 0) {
+      _i2cAddr = (_i2cAddr == ICM_ADDR_PRIMARY) ? ICM_ADDR_SECONDARY : ICM_ADDR_PRIMARY;
+    }
   }
   
   delay(10);
@@ -26,8 +88,10 @@ bool ICM42688P::begin(ICM_BUS busType, uint8_t pin, uint32_t freq) {
 
   uint8_t who = readRegister(ICM42688_REG_WHO_AM_I);
   if (who != WHO_AM_I_EXPECTED) {
-    Serial.print("ICM WHO_AM_I Error. Expected 0x47, got 0x");
-    Serial.println(who, HEX);
+    if (_debug) {
+      Serial.print(F("ICM WHO_AM_I Error. Expected 0x47, got 0x"));
+      Serial.println(who, HEX);
+    }
     return false;
   }
 
@@ -36,25 +100,24 @@ bool ICM42688P::begin(ICM_BUS busType, uint8_t pin, uint32_t freq) {
 
   setAccelFS(AFS_16G);
   setGyroFS(GFS_2000DPS);
-  setODR(ODR_1KHZ);
+  setODR(defaultOdr);
+  setFIFOMode(FIFO_NONE);
 
   return true;
 }
 
-// Opravená definice s size_t
 void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
   if (_bus == BUS_SPI) {
     SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    digitalWrite(_csPin, LOW);
+    if (_csPin != -1) digitalWrite(_csPin, LOW);
     SPI.transfer(startReg | 0x80); 
     for(size_t i=0; i<len; i++) buffer[i] = SPI.transfer(0x00);
-    digitalWrite(_csPin, HIGH);
+    if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
     Wire.beginTransmission(_i2cAddr);
     Wire.write(startReg);
     Wire.endTransmission(false);
-    // Přetypování size_t na int pro requestFrom
     Wire.requestFrom((int)_i2cAddr, (int)len);
     for(size_t i=0; i<len; i++) buffer[i] = (Wire.available()) ? Wire.read() : 0;
   }
@@ -63,10 +126,10 @@ void ICM42688P::readRegisters(uint8_t startReg, uint8_t* buffer, size_t len) {
 void ICM42688P::writeRegister(uint8_t reg, uint8_t data) {
   if (_bus == BUS_SPI) {
     SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    digitalWrite(_csPin, LOW);
+    if (_csPin != -1) digitalWrite(_csPin, LOW);
     SPI.transfer(reg & 0x7F); 
     SPI.transfer(data);
-    digitalWrite(_csPin, HIGH);
+    if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
     Wire.beginTransmission(_i2cAddr);
@@ -80,10 +143,10 @@ uint8_t ICM42688P::readRegister(uint8_t reg) {
   uint8_t data = 0;
   if (_bus == BUS_SPI) {
     SPI.beginTransaction(SPISettings(_spiFreq, MSBFIRST, SPI_MODE0));
-    digitalWrite(_csPin, LOW);
+    if (_csPin != -1) digitalWrite(_csPin, LOW);
     SPI.transfer(reg | 0x80); 
     data = SPI.transfer(0x00);
-    digitalWrite(_csPin, HIGH);
+    if (_csPin != -1) digitalWrite(_csPin, HIGH);
     SPI.endTransaction();
   } else {
     Wire.beginTransmission(_i2cAddr);
@@ -95,45 +158,124 @@ uint8_t ICM42688P::readRegister(uint8_t reg) {
   return data;
 }
 
-void ICM42688P::setODR(ICM_ODR odr) {
-  _odr = odr;
-  uint8_t odd = (uint8_t)odr;
-  // ODR se nastavuje v registrech GYRO_CONFIG0 a ACCEL_CONFIG0 (spodní 4 bity)
-  // Musíme načíst aktuální hodnotu, vymaskovat staré ODR a nastavit nové.
+int ICM42688P::getODRHz() {
+  return _getHzFromODR(_odr);
+}
+
+int ICM42688P::_getHzFromODR(ICM_ODR odr) {
+  switch(odr) {
+    case ODR_32KHZ: return 32000;
+    case ODR_16KHZ: return 16000;
+    case ODR_8KHZ:  return 8000;
+    case ODR_4KHZ:  return 4000;
+    case ODR_2KHZ:  return 2000;
+    case ODR_1KHZ:  return 1000;
+    case ODR_500HZ: return 500;
+    case ODR_200HZ: return 200;
+    case ODR_100HZ: return 100;
+    case ODR_50HZ:  return 50;
+    case ODR_25HZ:  return 25;
+    case ODR_12_5HZ:return 12; 
+    default: return 0;
+  }
+}
+
+void ICM42688P::enforceBandwidthLimit() {
+  uint32_t bytesPerRead = 0;
+  
+  if (_fifoMode == FIFO_NONE) bytesPerRead = 13; 
+  else if (_fifoMode == FIFO_16BIT) bytesPerRead = 20; 
+  else if (_fifoMode == FIFO_20BIT_HIRES) bytesPerRead = 24; 
+
+  uint32_t bitsPerByte = (_bus == BUS_I2C) ? 10 : 8; 
+  uint32_t bitsPerRead = bytesPerRead * bitsPerByte;
+  uint32_t maxAllowedBps = (uint32_t)(_spiFreq * 0.8f);
+
+  ICM_ODR odrList[] = {ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ, ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ};
+  ICM_ODR safeODR = _odr;
+  
+  for (int i = 0; i < 12; i++) {
+    int targetHz = _getHzFromODR(odrList[i]);
+    if (_getHzFromODR(safeODR) > targetHz) continue; 
+    
+    uint32_t requiredBps = bitsPerRead * targetHz;
+    if (requiredBps <= maxAllowedBps) {
+      safeODR = odrList[i];
+      break;
+    }
+  }
+
+  if (safeODR != _odr) {
+    if (_debug) {
+      Serial.print(F("Voltino TriSense WARNING: Bus bandwidth capacity exceeded (>80%). Downgrading ODR to "));
+      Serial.print(_getHzFromODR(safeODR));
+      Serial.println(F(" Hz."));
+    }
+    _odr = safeODR; 
+  }
+
+  uint8_t odd = (uint8_t)_odr;
   uint8_t gConf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0xF0;
   uint8_t aConf = readRegister(ICM42688_REG_ACCEL_CONFIG0) & 0xF0;
   writeRegister(ICM42688_REG_GYRO_CONFIG0, gConf | odd);
   writeRegister(ICM42688_REG_ACCEL_CONFIG0, aConf | odd);
 }
 
+void ICM42688P::setODR(ICM_ODR odr) {
+  _odr = odr;
+  enforceBandwidthLimit();
+}
+
 void ICM42688P::setAccelFS(ICM_ACCEL_FS fs) {
+  if (_fifoMode == FIFO_20BIT_HIRES) fs = AFS_16G;
+
   uint8_t conf = readRegister(ICM42688_REG_ACCEL_CONFIG0) & 0x1F;
-  // FS je v horních 3 bitech (bity 7:5), registr má formát: [7:5 FS] [4 rsvd] [3:0 ODR]
-  // V datasheetu je to často: UI_FS_SEL je bity 6:5 pro Gyro, 6:5 pro Accel v separátních registrech?
-  // Zkontrolujeme datasheet pro ICM-42688-P:
-  // ACCEL_CONFIG0 (0x50): Bity 7:5 = ACCEL_UI_FS_SEL, Bity 3:0 = ACCEL_ODR
   writeRegister(ICM42688_REG_ACCEL_CONFIG0, (conf & 0x1F) | (fs << 5));
-  
   switch(fs) {
-    case AFS_16G: _accelScaleFactor = 16.0f / 32768.0f; break; // 1/2048
-    case AFS_8G:  _accelScaleFactor = 8.0f  / 32768.0f; break; // 1/4096
-    case AFS_4G:  _accelScaleFactor = 4.0f  / 32768.0f; break; // 1/8192
-    case AFS_2G:  _accelScaleFactor = 2.0f  / 32768.0f; break; // 1/16384
+    case AFS_16G: _accelScaleFactor = 16.0f / 32768.0f; break; 
+    case AFS_8G:  _accelScaleFactor = 8.0f  / 32768.0f; break; 
+    case AFS_4G:  _accelScaleFactor = 4.0f  / 32768.0f; break; 
+    case AFS_2G:  _accelScaleFactor = 2.0f  / 32768.0f; break; 
   }
 }
 
 void ICM42688P::setGyroFS(ICM_GYRO_FS fs) {
+  if (_fifoMode == FIFO_20BIT_HIRES) fs = GFS_2000DPS;
+
   uint8_t conf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0x1F;
-  // GYRO_CONFIG0 (0x4F): Bity 7:5 = GYRO_UI_FS_SEL, Bity 3:0 = GYRO_ODR
   writeRegister(ICM42688_REG_GYRO_CONFIG0, (conf & 0x1F) | (fs << 5));
-  
   switch(fs) {
-    case GFS_2000DPS: _gyroScaleFactor = 2000.0f / 32768.0f; break; // 1/16.4
-    case GFS_1000DPS: _gyroScaleFactor = 1000.0f / 32768.0f; break; // 1/32.8
-    case GFS_500DPS:  _gyroScaleFactor = 500.0f  / 32768.0f; break; // 1/65.5
-    case GFS_250DPS:  _gyroScaleFactor = 250.0f  / 32768.0f; break; // 1/131
-    case GFS_125DPS:  _gyroScaleFactor = 125.0f  / 32768.0f; break; // 1/262
+    case GFS_2000DPS: _gyroScaleFactor = 2000.0f / 32768.0f; break; 
+    case GFS_1000DPS: _gyroScaleFactor = 1000.0f / 32768.0f; break; 
+    case GFS_500DPS:  _gyroScaleFactor = 500.0f  / 32768.0f; break; 
+    case GFS_250DPS:  _gyroScaleFactor = 250.0f  / 32768.0f; break; 
+    case GFS_125DPS:  _gyroScaleFactor = 125.0f  / 32768.0f; break; 
   }
+}
+
+void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
+  #if defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
+    if (mode == FIFO_20BIT_HIRES) {
+      mode = FIFO_16BIT;
+    }
+  #endif
+
+  _fifoMode = mode;
+
+  writeRegister(ICM42688_REG_FIFO_CONFIG, 0x00);
+  writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x00);
+
+  if (mode == FIFO_16BIT) {
+    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
+  } 
+  else if (mode == FIFO_20BIT_HIRES) {
+    setAccelFS(AFS_16G);
+    setGyroFS(GFS_2000DPS);
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x10); 
+    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
+  }
+  
+  enforceBandwidthLimit(); 
 }
 
 void ICM42688P::setAccelOffset(float x, float y, float z) { accOffset[0] = x; accOffset[1] = y; accOffset[2] = z; }
@@ -165,7 +307,24 @@ float ICM42688P::getGyroOffsetZ() { return gyrOffset[2]; }
 void ICM42688P::resetHardwareOffsets() { setBank(0); }
 void ICM42688P::setBank(uint8_t bank) { writeRegister(ICM42688_REG_BANK_SEL, bank); }
 
+bool ICM42688P::readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
+  switch (_fifoMode) {
+    case FIFO_NONE:
+      return readSensorData(ax, ay, az, gx, gy, gz);
+    case FIFO_16BIT:
+      return readHardwareFIFO(ax, ay, az, gx, gy, gz);
+    case FIFO_20BIT_HIRES:
+      return readHardwareFIFOHires(ax, ay, az, gx, gy, gz);
+    default:
+      return false;
+  }
+}
+
 bool ICM42688P::readFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
+  return readIMU(ax, ay, az, gx, gy, gz);
+}
+
+bool ICM42688P::readSensorData(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
   uint8_t buffer[12];
   readRegisters(ICM42688_REG_ACCEL_DATA_X1, buffer, 12);
   
@@ -176,10 +335,8 @@ bool ICM42688P::readFIFO(float& ax, float& ay, float& az, float& gx, float& gy, 
   int16_t rawGy = (int16_t)((buffer[8] << 8) | buffer[9]);
   int16_t rawGz = (int16_t)((buffer[10] << 8) | buffer[11]);
   
-  // Detekce neplatných dat (vše -1 nebo vše 0 je podezřelé, ale 0 může být validní. -1 je u SPI často chyba)
   if (rawAx == -1 && rawAy == -1 && rawAz == -1 && rawGx == -1) return false;
   
-  // Aplikace škálování a kalibrace
   ax = ((float)rawAx * _accelScaleFactor - accOffset[0]) * accScale[0];
   ay = ((float)rawAy * _accelScaleFactor - accOffset[1]) * accScale[1];
   az = ((float)rawAz * _accelScaleFactor - accOffset[2]) * accScale[2];
@@ -191,6 +348,70 @@ bool ICM42688P::readFIFO(float& ax, float& ay, float& az, float& gx, float& gy, 
   return true;
 }
 
+bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
+  uint8_t countBuf[2];
+  readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
+  uint16_t fifoCount = (countBuf[0] << 8) | countBuf[1];
+
+  if (fifoCount < 16) return false; 
+
+  uint8_t buffer[16];
+  readRegisters(ICM42688_REG_FIFO_DATA, buffer, 16);
+
+  if ((buffer[0] & 0x80) != 0) return false; 
+
+  int16_t rawAx = (int16_t)((buffer[1] << 8) | buffer[2]);
+  int16_t rawAy = (int16_t)((buffer[3] << 8) | buffer[4]);
+  int16_t rawAz = (int16_t)((buffer[5] << 8) | buffer[6]);
+  int16_t rawGx = (int16_t)((buffer[7] << 8) | buffer[8]);
+  int16_t rawGy = (int16_t)((buffer[9] << 8) | buffer[10]);
+  int16_t rawGz = (int16_t)((buffer[11] << 8) | buffer[12]);
+
+  ax = ((float)rawAx * _accelScaleFactor - accOffset[0]) * accScale[0];
+  ay = ((float)rawAy * _accelScaleFactor - accOffset[1]) * accScale[1];
+  az = ((float)rawAz * _accelScaleFactor - accOffset[2]) * accScale[2];
+  
+  gx = (float)rawGx * _gyroScaleFactor - gyrOffset[0];
+  gy = (float)rawGy * _gyroScaleFactor - gyrOffset[1];
+  gz = (float)rawGz * _gyroScaleFactor - gyrOffset[2];
+
+  return true;
+}
+
+bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
+  uint8_t countBuf[2];
+  readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
+  uint16_t fifoCount = (countBuf[0] << 8) | countBuf[1];
+
+  if (fifoCount < 20) return false; 
+
+  uint8_t buffer[20];
+  readRegisters(ICM42688_REG_FIFO_DATA, buffer, 20);
+
+  if ((buffer[0] & 0x80) != 0) return false;
+
+  int32_t rawAx = (int32_t)((buffer[1] << 24) | (buffer[2] << 16) | (buffer[3] << 8)) >> 12;
+  int32_t rawAy = (int32_t)((buffer[4] << 24) | (buffer[5] << 16) | (buffer[6] << 8)) >> 12;
+  int32_t rawAz = (int32_t)((buffer[7] << 24) | (buffer[8] << 16) | (buffer[9] << 8)) >> 12;
+  
+  int32_t rawGx = (int32_t)((buffer[10] << 24) | (buffer[11] << 16) | (buffer[12] << 8)) >> 12;
+  int32_t rawGy = (int32_t)((buffer[13] << 24) | (buffer[14] << 16) | (buffer[15] << 8)) >> 12;
+  int32_t rawGz = (int32_t)((buffer[16] << 24) | (buffer[17] << 16) | (buffer[18] << 8)) >> 12;
+
+  float scaleAccel20 = 16.0f / 524288.0f;
+  float scaleGyro20  = 2000.0f / 524288.0f;
+
+  ax = ((float)rawAx * scaleAccel20 - accOffset[0]) * accScale[0];
+  ay = ((float)rawAy * scaleAccel20 - accOffset[1]) * accScale[1];
+  az = ((float)rawAz * scaleAccel20 - accOffset[2]) * accScale[2];
+  
+  gx = (float)rawGx * scaleGyro20 - gyrOffset[0];
+  gy = (float)rawGy * scaleGyro20 - gyrOffset[1];
+  gz = (float)rawGz * scaleGyro20 - gyrOffset[2];
+
+  return true;
+}
+
 float ICM42688P::readTemperature() {
   uint8_t buffer[2];
   readRegisters(ICM42688_REG_TEMP_DATA1, buffer, 2);
@@ -199,22 +420,26 @@ float ICM42688P::readTemperature() {
 }
 
 void ICM42688P::autoCalibrateGyro(uint16_t samples) {
-  Serial.println("GYRO CALIBRATION (SW)... Keep still.");
+  Serial.println(F("GYRO CALIBRATION (SW)... Keep still."));
   gyrOffset[0] = 0; gyrOffset[1] = 0; gyrOffset[2] = 0;
   double gxSum = 0, gySum = 0, gzSum = 0;
   float ax, ay, az, gx, gy, gz;
   int count = 0;
   unsigned long startT = millis();
+  unsigned long lastMicros = micros();
   
   while(count < samples) {
-    if (millis() - startT > 10000) { // Timeout 10s
-      Serial.println("Error: Sensor read timeout during calibration.");
+    if (millis() - startT > 10000) { 
+      Serial.println(F("Error: Sensor read timeout during calibration."));
       break;
     }
-    if(readFIFO(ax, ay, az, gx, gy, gz)) {
-      gxSum += gx; gySum += gy; gzSum += gz;
-      count++;
-      delay(2); 
+    
+    if (micros() - lastMicros >= 1000) {
+      lastMicros = micros();
+      if(readIMU(ax, ay, az, gx, gy, gz)) {
+        gxSum += gx; gySum += gy; gzSum += gz;
+        count++;
+      }
     }
   }
   
@@ -224,8 +449,8 @@ void ICM42688P::autoCalibrateGyro(uint16_t samples) {
       gyrOffset[2] = (float)(gzSum / count);
   }
   
-  Serial.println("DONE. Results:");
-  Serial.print("Gyro Bias: ");
+  Serial.println(F("DONE. Results:"));
+  Serial.print(F("Gyro Bias: "));
   Serial.print(gyrOffset[0], 4); Serial.print(", ");
   Serial.print(gyrOffset[1], 4); Serial.print(", ");
   Serial.println(gyrOffset[2], 4);
@@ -244,37 +469,50 @@ void ICM42688P::autoCalibrateAccel() {
   for (int i = 0; i < 6; i++) {
     Serial.print(F("\nPosition ")); Serial.print(i + 1); Serial.println(F("/6 -> Send 'y' to measure"));
     
-    // Čekání na vstup
     while (Serial.available()) Serial.read(); 
-    while (!Serial.available()); 
+    
+    unsigned long waitStart = millis();
+    while (!Serial.available()) {
+      if (millis() - waitStart > 60000) {
+         Serial.println(F("Timeout waiting for user input."));
+         return;
+      }
+      yield();
+    }
+    
     char cmd = Serial.read();
-    if (cmd == '\n' || cmd == '\r') { while(!Serial.available()); Serial.read(); }
+    if (cmd == '\n' || cmd == '\r') { 
+        while(!Serial.available()) { yield(); } 
+        Serial.read(); 
+    }
     
     Serial.println(F("Measuring..."));
     double sumX = 0, sumY = 0, sumZ = 0;
     int count = 0;
     unsigned long start = millis();
+    unsigned long lastMicros = micros();
     
     while (millis() - start < 1500) {
-      float ax, ay, az, gx, gy, gz;
-      if (readFIFO(ax, ay, az, gx, gy, gz)) {
-        sumX += ax; sumY += ay; sumZ += az; count++;
+      if (micros() - lastMicros >= 1000) { 
+        lastMicros = micros();
+        float ax, ay, az, gx, gy, gz;
+        if (readIMU(ax, ay, az, gx, gy, gz)) {
+          sumX += ax; sumY += ay; sumZ += az; count++;
+        }
       }
-      delay(2);
     }
     
-    if (count == 0) { Serial.println("Error: No data from sensor!"); return; }
+    if (count == 0) { Serial.println(F("Error: No data from sensor!")); return; }
     
     points[i].x = sumX / count; 
     points[i].y = sumY / count; 
     points[i].z = sumZ / count;
     
-    Serial.print(F("Raw G: ")); Serial.print(points[i].x); Serial.print(", ");
-    Serial.print(points[i].y); Serial.print(", "); Serial.println(points[i].z);
+    Serial.print(F("Raw G: ")); Serial.print(points[i].x); Serial.print(F(", "));
+    Serial.print(points[i].y); Serial.print(F(", ")); Serial.println(points[i].z);
   }
   
   Serial.println(F("\nCalculating Sphere Fit..."));
-  // Jednoduchý gradient descent pro nalezení středu a škálování elipsoidu
   float bx = 0, by = 0, bz = 0;
   float sx = 1, sy = 1, sz = 1;
   float learningRate = 0.05;
@@ -289,7 +527,7 @@ void ICM42688P::autoCalibrateAccel() {
       float adjZ = (points[i].z - bz) * sz;
       
       float radius = sqrt(adjX*adjX + adjY*adjY + adjZ*adjZ);
-      float error = radius - 1.0f; // Cílový poloměr je 1G
+      float error = radius - 1.0f;
       float common = error / radius;
       
       dbx += -2.0f * common * adjX * sx;
@@ -316,8 +554,8 @@ void ICM42688P::autoCalibrateAccel() {
   
   Serial.println(F("\n--- COPY TO SETUP() ---"));
   Serial.print(F("IMU.setAccelOffset(")); 
-  Serial.print(bx, 5); Serial.print(", "); Serial.print(by, 5); Serial.print(", "); Serial.print(bz, 5); Serial.println(");");
+  Serial.print(bx, 5); Serial.print(F(", ")); Serial.print(by, 5); Serial.print(F(", ")); Serial.print(bz, 5); Serial.println(F(");"));
   Serial.print(F("IMU.setAccelScale(")); 
-  Serial.print(sx, 5); Serial.print(", "); Serial.print(sy, 5); Serial.print(", "); Serial.print(sz, 5); Serial.println(");");
+  Serial.print(sx, 5); Serial.print(F(", ")); Serial.print(sy, 5); Serial.print(F(", ")); Serial.print(sz, 5); Serial.println(F(");"));
   Serial.println(F("-----------------------"));
 }

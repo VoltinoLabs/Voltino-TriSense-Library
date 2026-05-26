@@ -4,10 +4,10 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// I2C adresa AK09918C
+// I2C address for AK09918C (Fixed)
 #define AK09918_I2C_ADDR  0x0C
 
-// Registry
+// Registers
 #define AK09918_REG_WIA1    0x00
 #define AK09918_REG_WIA2    0x01
 #define AK09918_REG_ST1     0x10
@@ -22,50 +22,64 @@
 #define AK09918_REG_CNTL2   0x31
 #define AK09918_REG_CNTL3   0x32
 
-// Módy
-#define AK09918_MODE_POWER_DOWN 0x00
-#define AK09918_MODE_SINGLE     0x01
-#define AK09918_MODE_CONT_10HZ  0x02
-#define AK09918_MODE_CONT_20HZ  0x04
-#define AK09918_MODE_CONT_50HZ  0x06
-#define AK09918_MODE_CONT_100HZ 0x08
-#define AK09918_MODE_SELF_TEST  0x10
-
-// Identifikátory
+// Identifiers
 #define AK09918_WIA1_VAL    0x48
 #define AK09918_WIA2_VAL    0x0C
 
+// Voltino Standard ODR (Output Data Rate) for continuous measurement
+enum AK09918_ODR {
+  ODR_10HZ  = 0x02,
+  ODR_20HZ  = 0x04,
+  ODR_50HZ  = 0x06,
+  ODR_100HZ = 0x08
+};
+
+// System operation modes
+enum AK09918_Mode {
+  MODE_POWER_DOWN = 0x00,
+  MODE_SINGLE     = 0x01,
+  MODE_SELF_TEST  = 0x10
+};
+
 class AK09918C {
 public:
-  AK09918C(TwoWire& wire = Wire);
+  AK09918C();
 
-  bool begin(uint8_t mode = AK09918_MODE_CONT_100HZ);
+  // Standalone initialization matching Voltino conventions. 
+  // Automatically handles bus init. Supports custom pins for ESP32/8266.
+  bool beginI2C(uint32_t freq = 400000, int8_t sdaPin = -1, int8_t sclPin = -1, AK09918_ODR odr = ODR_100HZ);
   
-  // Hlavní funkce pro update
-  // Vrací true, pokud jsou nová data přečtena a uložena do public proměnných
+  // Standard begin method (used by TriSense wrapper to avoid overriding bus configuration)
+  bool begin(AK09918_ODR odr = ODR_100HZ, TwoWire &wire = Wire);
+  
+  // Highly optimized polled reading with early-exit on ST1
   bool readData();
   
-  void setODR(uint8_t mode); // Nastavení rychlosti (10, 20, 50, 100 Hz)
+  // Mode and ODR configuration functions
+  void setODR(AK09918_ODR odr); 
+  void setMode(AK09918_Mode mode);
+  
+  // Hardware reset
   void softReset();
 
-  // Veřejné proměnné pro přímý přístup (jako v TriSense)
-  // Jednotky: uT (micro Tesla)
+  // Public variables for direct access (Units: uT)
   float x = 0.0f;
   float y = 0.0f;
   float z = 0.0f;
   
-  // Raw data, pokud by byla potřeba
+  // Raw integer data
   int16_t x_raw = 0;
   int16_t y_raw = 0;
   int16_t z_raw = 0;
   
-  bool overflow = false; // Indikuje magnetické zahlcení
+  // Magnetic saturation flag
+  bool overflow = false; 
 
 private:
   TwoWire* _wire;
+  uint8_t _currentMode;
   
-  // OPTIMALIZACE: Fixní konstanta citlivosti pro float násobení
-  // 0.15 uT per LSB podle datasheetu
+  // Sensitivity constant for float multiplication (0.15 uT/LSB according to datasheet)
   static constexpr float MAG_SCALE = 0.15f;
 
   void writeRegister(uint8_t reg, uint8_t val);

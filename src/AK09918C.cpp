@@ -1,104 +1,141 @@
 #include "AK09918C.h"
 
-AK09918C::AK09918C(TwoWire& wire) {
-  _wire = &wire;
+AK09918C::AK09918C() {
+  _wire = &Wire;
+  _currentMode = ODR_100HZ;
 }
 
-bool AK09918C::begin(uint8_t mode) {
+// Standalone initialization matching Voltino conventions
+bool AK09918C::beginI2C(uint32_t freq, int8_t sdaPin, int8_t sclPin, AK09918_ODR odr) {
+  _wire = &Wire;
+  _currentMode = odr;
+
+  // Handle custom I2C pins primarily for ESP32 and ESP8266 architectures
+#if defined(ESP32) || defined(ESP8266)
+  if (sdaPin >= 0 && sclPin >= 0) {
+    _wire->begin(sdaPin, sclPin);
+  } else {
+    _wire->begin();
+  }
+#else
+  // Standard Arduino platforms (AVR, etc.) do not accept pins in Wire.begin()
   _wire->begin();
-  // Standard I2C 400kHz, AK09918 to zvládá
-  _wire->setClock(400000); 
+  (void)sdaPin; // Suppress unused variable warnings
+  (void)sclPin;
+#endif
+
+  _wire->setClock(freq);
+  
+  // Call the core initialization sequence
+  return begin(odr, *_wire);
+}
+
+// Core initialization (does not force bus start - safe for TriSense master class)
+bool AK09918C::begin(AK09918_ODR odr, TwoWire &wire) {
+  _wire = &wire;
+  _currentMode = odr;
 
   delay(10);
   
-  // Check ID
+  // Check Device ID
   uint8_t wia1 = readRegister(AK09918_REG_WIA1);
   uint8_t wia2 = readRegister(AK09918_REG_WIA2);
   
   if (wia1 != AK09918_WIA1_VAL || wia2 != AK09918_WIA2_VAL) {
-    return false;
+    return false; // Connection failed or wrong sensor attached
   }
 
   softReset();
   
-  // Nastavení módu (defaultně Continuous 100Hz)
-  setODR(mode);
+  // Set Output Data Rate mode
+  setODR(odr);
   
   return true;
 }
 
 void AK09918C::softReset() {
-  writeRegister(AK09918_REG_CNTL3, 0x01); // Reset
-  delay(2); // Počkat na dokončení resetu
+  writeRegister(AK09918_REG_CNTL3, 0x01); // Reset trigger
+  delay(2); // Wait for the reset sequence to complete
 }
 
-void AK09918C::setODR(uint8_t mode) {
-  // Nejprve musíme přepnout do Power-down, abychom mohli změnit mód
-  writeRegister(AK09918_REG_CNTL2, AK09918_MODE_POWER_DOWN);
+void AK09918C::setODR(AK09918_ODR odr) {
+  // The sensor must be placed into Power-down mode before changing the operation mode
+  writeRegister(AK09918_REG_CNTL2, MODE_POWER_DOWN);
+  delay(1);
+  writeRegister(AK09918_REG_CNTL2, odr);
+  _currentMode = odr;
+  delay(1);
+}
+
+void AK09918C::setMode(AK09918_Mode mode) {
+  // Used for switching to system modes like Single Measurement or Power-Down
+  writeRegister(AK09918_REG_CNTL2, MODE_POWER_DOWN);
   delay(1);
   writeRegister(AK09918_REG_CNTL2, mode);
+  _currentMode = mode;
   delay(1);
 }
 
-// OPTIMALIZOVANÉ ČTENÍ
+// Highly optimized early-exit read implementation
 bool AK09918C::readData() {
-  // Burst read od ST1 (0x10) až po ST2 (0x18)
-  // Registry: ST1, HXL, HXH, HYL, HYH, HZL, HZH, TMPS, ST2
-  // Celkem 9 bytů.
-  
-  // 1. Nastavit pointer na ST1
+  // Step 1: Read only ST1 (Status 1) to check if data is ready.
+  // This avoids hammering the I2C bus with 9-byte requests during high-frequency sensor fusion loops.
   _wire->beginTransmission(AK09918_I2C_ADDR);
   _wire->write(AK09918_REG_ST1);
   if (_wire->endTransmission(false) != 0) {
-    return false; // Chyba sběrnice
+    return false; // Bus communication error
   }
 
-  // 2. Přečíst 9 bytů najednou
-  if (_wire->requestFrom(AK09918_I2C_ADDR, 9) != 9) {
-    return false; // Nedostali jsme všechna data
+  // Use explicit casts to avoid ambiguous overloading on some Arduino cores
+  if (_wire->requestFrom((uint8_t)AK09918_I2C_ADDR, (uint8_t)1) != 1) {
+    return false; // Failed to retrieve status byte
   }
 
-  uint8_t buffer[9];
-  for(int i=0; i<9; i++) {
+  uint8_t st1 = _wire->read();
+
+  // Check DRDY (Data Ready) bit 0
+  if ((st1 & 0x01) == 0) {
+    return false; // Early exit, saves significant I2C bandwidth
+  }
+
+  // Step 2: Data is ready, perform 8-byte burst read (HXL to ST2)
+  _wire->beginTransmission(AK09918_I2C_ADDR);
+  _wire->write(AK09918_REG_HXL);
+  if (_wire->endTransmission(false) != 0) {
+    return false; 
+  }
+
+  if (_wire->requestFrom((uint8_t)AK09918_I2C_ADDR, (uint8_t)8) != 8) {
+    return false; 
+  }
+
+  uint8_t buffer[8];
+  for (int i = 0; i < 8; i++) {
     buffer[i] = _wire->read();
   }
 
-  // 3. Analýza dat
-  // Byte 0: ST1 - Status 1
-  // Bit 0 (DRDY) musí být 1, jinak data nejsou připravena
-  // Bit 1 (DOR) indikuje Data Overrun (přeskočená data), ale to pro fúzi tolik nevadí, bereme nejnovější.
-  if ((buffer[0] & 0x01) == 0) {
-    return false; // Data nejsou připravena
-  }
+  // Parse Raw Measurement Data (Little Endian format)
+  int16_t rx = (int16_t)((buffer[1] << 8) | buffer[0]);
+  int16_t ry = (int16_t)((buffer[3] << 8) | buffer[2]);
+  int16_t rz = (int16_t)((buffer[5] << 8) | buffer[4]);
 
-  // Raw data (Little Endian)
-  // Buffer: 1=XL, 2=XH, 3=YL, 4=YH, 5=ZL, 6=ZH
-  int16_t rx = (int16_t)((buffer[2] << 8) | buffer[1]);
-  int16_t ry = (int16_t)((buffer[4] << 8) | buffer[3]);
-  int16_t rz = (int16_t)((buffer[6] << 8) | buffer[5]);
-
-  // Byte 8: ST2 - Status 2
-  // Bit 3 (HOFL) indikuje magnetic sensor overflow
-  uint8_t st2 = buffer[8];
+  // Index 7 is ST2. Must be read to unlock the data registers for the next cycle.
+  uint8_t st2 = buffer[7];
   
-  // Senzor vyžaduje přečtení ST2 k uvolnění dat (to jsme právě udělali v burst readu),
-  // takže není třeba další čtení.
-  
+  // Check HOFL (Magnetic Sensor Overflow) bit 3
   if (st2 & 0x08) {
     overflow = true;
-    // Při overflow jsou data nesmyslná, ale pro fusion je lepší nevracet nic
-    // nebo vrátit limitní hodnotu. Zde vrátíme false, aby fúze nepočítala s chybou.
-    return false; 
+    return false; // Discard invalid values during magnetic saturation to protect fusion integrity
   } else {
     overflow = false;
   }
 
-  // Uložení raw hodnot
+  // Store valid raw integers
   x_raw = rx;
   y_raw = ry;
   z_raw = rz;
 
-  // Převod na uT (float optimalizace)
+  // Convert raw values to microTeslas (uT) using pre-calculated scale factor
   x = (float)rx * MAG_SCALE;
   y = (float)ry * MAG_SCALE;
   z = (float)rz * MAG_SCALE;
@@ -118,7 +155,7 @@ uint8_t AK09918C::readRegister(uint8_t reg) {
   _wire->write(reg);
   _wire->endTransmission(false);
   
-  _wire->requestFrom(AK09918_I2C_ADDR, 1);
+  _wire->requestFrom((uint8_t)AK09918_I2C_ADDR, (uint8_t)1);
   if (_wire->available()) {
     return _wire->read();
   }
