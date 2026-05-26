@@ -1,34 +1,89 @@
 # Voltino TriSense Library
 
 ## Overview
+
 **Voltino TriSense** is a high-performance Arduino library designed specifically for the **Voltino TriSense Pro** sensor board. It provides a unified interface for initializing and reading data from state-of-the-art environmental and motion sensors.
 
-Beyond simple data reading, this library features a robust **Advanced Sensor Fusion** engine. It combines high-speed IMU data with Magnetometer readings using an adaptive quaternion-based complementary filter to provide stable, drift-free orientation (Roll, Pitch, Yaw) and Earth-frame Global Acceleration.
+The library features **two Sensor Fusion engines** — `SimpleTriFusion` (lightweight, gyro-only) and `AdvancedTriFusion` (full AHRS with adaptive quaternion-based complementary filtering) — to provide stable, drift-free orientation (Roll, Pitch, Yaw) and Earth-frame Global Acceleration.
+
+> **New in v4.0:** Automatic architecture detection, dual fusion backends, Smart Caching on the BMP580, high-res 20-bit FIFO mode, and platform-tuned defaults.
+
+---
 
 ## Hardware Support
+
 The library supports the following sensors onboard the Voltino TriSense Pro:
-* **ICM-42688-P:** High-precision 6-Axis MEMS MotionTracking™ (Accelerometer + Gyroscope).
-* **AK09918C:** High-sensitivity 3-Axis Magnetometer with compass capabilities.
-* **BMP580:** High-performance barometric pressure and temperature sensor.
+
+| Sensor | Type | Bus | Key Specs |
+|--------|------|-----|-----------|
+| **ICM-42688-P** | 6-Axis IMU (Accel + Gyro) | SPI (up to 12 MHz) or I2C | ODR up to 32 kHz, 20-bit high-resolution FIFO |
+| **AK09918C** | 3-Axis Magnetometer | I2C | ODR up to 100 Hz, 0.15 µT/LSB sensitivity |
+| **BMP580** | Barometric Pressure + Temp | I2C | ODR up to 240 Hz, IIR filter, smart caching |
+
+---
 
 ## Key Features
 
 ### 🚀 Hybrid Bus Architecture
-To maximize performance, the library supports a **Hybrid Mode**.
-* **SPI (up to 10 MHz):** Used for the **ICM-42688-P** to achieve high sampling rates (up to 8kHz/32kHz) and low latency.
-* **I2C:** Used for the **AK09918C** and **BMP580** for standard communication.
-* *Note:* A standard I2C-only mode is also available for compatibility.
 
-### 🧠 Advanced Sensor Fusion (AHRS)
-The `AdvancedTriFusion` class implements a sophisticated sensor fusion algorithm:
-* **Adaptive Gaussian Gains:** Dynamically adjusts trust in the Accelerometer and Magnetometer based on motion intensity and magnetic anomalies.
-* **Gyro Bias Learning:** Automatically estimates and corrects gyroscope drift in the Yaw axis using an integral (Ki) controller.
-* **Tilt Compensation:** Ensures accurate compass heading even when the device is tilted steeply.
-* **Global Acceleration:** Calculates linear acceleration vectors relative to the Earth, removing gravity and sensor tilt.
+To maximize performance, the library supports a **Hybrid Mode**:
 
-### 🛠️ Calibration Tools
-* **Sphere Fit:** Built-in algorithm for 6-point Accelerometer calibration (Offset & Scale).
-* **MotionCal Support:** Compatible with the visual MotionCal tool for Hard/Soft Iron Magnetometer calibration.
+- **SPI (up to 12 MHz)** — Used for the **ICM-42688-P** to achieve high sampling rates (up to 8 kHz on AVR, 32 kHz on ESP32/RP2040) and low latency.
+- **I2C** — Used for the **AK09918C** and **BMP580** for standard communication.
+- *A standard I2C-only mode is also available for compatibility.*
+
+Platform-specific pin configuration is supported for **ESP32**, **RP2040**, and **RP2350** architectures.
+
+### 🧠 Dual Sensor Fusion Engines
+
+| Feature | `SimpleTriFusion` | `AdvancedTriFusion` |
+|---------|-------------------|---------------------|
+| Gyro Integration | ✅ | ✅ |
+| Accelerometer Correction | ❌ | ✅ (adaptive Gaussian) |
+| Magnetometer Correction | ❌ | ✅ (tilt-compensated) |
+| Gyro Bias Learning (Yaw) | ❌ | ✅ (Ki controller) |
+| Magnetic Anomaly Rejection | ❌ | ✅ |
+| Computational Cost | Very Low | Moderate |
+| Use Case | High-rate rotation tracking | Full AHRS orientation |
+
+### ⚙️ Automatic Architecture Detection
+
+The library auto-detects your platform and sets optimal defaults:
+
+| Platform | Math Type | Default SPI ODR | Calibration Samples |
+|----------|-----------|-----------------|---------------------|
+| **AVR** (Uno, Mega, Nano) | `float` | 500 Hz | 200 |
+| **ESP32** | `double` | 8 kHz | 1000 |
+| **RP2040 / RP2350** | `float` | 8 kHz | 1000 |
+| **Other** | `float` | 1 kHz | 500 |
+
+You can override precision manually by defining `FORCE_FUSION_FLOAT` or `FORCE_FUSION_DOUBLE` before including the library.
+
+### 📦 TriSense Data Snapshot
+
+The new `getSnapshot()` method returns all sensor data in a single synchronous call:
+
+```cpp
+TriSenseDataSnapshot data;
+sensor.getSnapshot(data);
+// data.accelX, data.gyroX, data.magX, data.pressure, data.temperature ...
+```
+
+### 🛠️ Smart BMP580 Caching
+
+The BMP580 driver uses an **adaptive cache** that intelligently re-reads the sensor only when the cached data has expired — based on the actual ODR frequency. This saves I²C bus bandwidth and reduces power consumption.
+
+### 🎯 ICM-42688-P 20-Bit High-Resolution FIFO
+
+Supports three FIFO modes:
+
+- `FIFO_NONE` — Direct register reads (simple, minimal latency)
+- `FIFO_16BIT` — 16-bit FIFO packet mode (balanced)
+- `FIFO_20BIT_HIRES` — 20-bit high-resolution mode (16× precision, **automatically disabled on AVR** to save RAM)
+
+### 📈 Real-Time ODR Drift Tracker
+
+The fusion engine continuously measures the actual time between IMU samples (`_realDt`) and adapts to variations in the real-world output data rate, ensuring mathematically correct integration even under CPU load or bus contention.
 
 ---
 
@@ -36,19 +91,18 @@ The `AdvancedTriFusion` class implements a sophisticated sensor fusion algorithm
 
 1.  Download the latest release `.zip` file from the GitHub repository.
 2.  Open Arduino IDE.
-3.  Go to **Sketch > Include Library > Add .ZIP Library...**
+3.  Go to **Sketch → Include Library → Add .ZIP Library...**
 4.  Select the downloaded file.
 
 **Dependencies:**
-* `Wire.h`
-* `SPI.h`
+- `Wire.h`
+- `SPI.h`
 
 ---
 
 ## Getting Started
 
 ### 1. Initialization
-You can initialize all sensors with a single call.
 
 ```cpp
 #include <TriSense.h>
@@ -58,44 +112,59 @@ TriSense sensor;
 void setup() {
   Serial.begin(115200);
 
-  // Initialize in Hybrid Mode (Recommended for performance)
-  // - ICM42688P on SPI (CS Pin 17, 10 MHz)
-  // - BMP580 & AK09918C on I2C
+  // --- Hybrid Mode (recommended) ---
+  // ICM-42688-P on SPI (CS pin 17), BMP580 & AK09918C on I2C
   bool success = sensor.beginAll(MODE_HYBRID, 17, 10000000);
+
+  // --- I2C-only Mode ---
+  // bool success = sensor.beginAll(MODE_I2C);
 
   if (!success) {
     Serial.println("Sensor initialization failed!");
     while (1);
   }
-
-  // Set IMU Output Data Rate (ODR)
-  sensor.imu.setODR(ODR_1KHZ); 
 }
 ```
 
 ### 2. Reading Raw Data
 
-Access individual sensor instances directly via `sensor.bmp`, `sensor.mag`, and `sensor.imu`.
+Access individual sensor instances via `sensor.bmp`, `sensor.mag`, and `sensor.imu`.
 
 ```cpp
 void loop() {
-  // --- BMP580 (Pressure/Temp) ---
-  float temp = sensor.bmp.readTemperature();
+  // --- BMP580 (Pressure / Temp / Altitude) ---
+  float temp  = sensor.bmp.readTemperature();
   float press = sensor.bmp.readPressure();
-  float alt = sensor.bmp.readAltitude(101325); // 101325 Pa as sea level standard
+  float alt   = sensor.bmp.readAltitude(101325.0f); // sea level pressure in Pa
 
   // --- AK09918C (Magnetometer) ---
   if (sensor.mag.readData()) {
-      float mx = sensor.mag.x;
-      float my = sensor.mag.y;
-      float mz = sensor.mag.z;
+    Serial.print("Mag: ");
+    Serial.print(sensor.mag.x, 2); Serial.print(", ");
+    Serial.print(sensor.mag.y, 2); Serial.print(", ");
+    Serial.println(sensor.mag.z, 2);
   }
 
   // --- ICM-42688-P (Accel/Gyro) ---
   float ax, ay, az, gx, gy, gz;
-  // readFIFO returns true if new data is available
   if (sensor.imu.readFIFO(ax, ay, az, gx, gy, gz)) {
-      Serial.print("Accel Z: "); Serial.println(az);
+    Serial.print("Accel Z: "); Serial.println(az);
+  }
+}
+```
+
+### 3. Unified Snapshot
+
+Read all sensors in one call using the data snapshot structure:
+
+```cpp
+void loop() {
+  TriSenseDataSnapshot data;
+  if (sensor.getSnapshot(data)) {
+    Serial.print("A:"); Serial.print(data.accelX);
+    Serial.print(" G:"); Serial.print(data.gyroX);
+    Serial.print(" M:"); Serial.print(data.magX);
+    Serial.print(" P:"); Serial.println(data.pressure);
   }
 }
 ```
@@ -104,121 +173,337 @@ void loop() {
 
 ## Using Sensor Fusion
 
-To get stable orientation (Roll, Pitch, Yaw), use the `AdvancedTriFusion` class.
+The library offers **two fusion backends**. Choose based on your needs.
 
-### 1. Setup and Calibration
+### SimpleTriFusion — Lightweight Gyro-Only Integration
 
-Accurate fusion requires calibration constants.
+This engine integrates gyroscope data into a quaternion orientation. It does **not** use the accelerometer or magnetometer for correction, making it ideal for high-speed rotation tracking where absolute heading is not required.
 
 ```cpp
-// Pass pointers to the sensor objects
+#include <TriSense.h>
+
+TriSense sensor;
+SimpleTriFusion fusion(&sensor.imu, &sensor.mag); // mag pointer required but unused
+
+void setup() {
+  sensor.beginAll(MODE_HYBRID);
+  
+  // Apply gyro offsets (from calibration)
+  sensor.imu.setGyroOffset(-0.05, 0.02, 0.10);
+  
+  // Initialize orientation (averages initial samples)
+  fusion.initOrientation();
+}
+
+void loop() {
+  if (fusion.update()) {
+    float roll, pitch, yaw;
+    fusion.getOrientationDegrees(roll, pitch, yaw);
+    Serial.print("R:"); Serial.print(roll);
+    Serial.print(" P:"); Serial.print(pitch);
+    Serial.print(" Y:"); Serial.println(yaw);
+  }
+}
+```
+
+### AdvancedTriFusion — Full AHRS with Adaptive Gains
+
+This engine combines gyroscope integration with accelerometer and magnetometer corrections using an adaptive complementary filter. It provides drift-free Roll, Pitch, Yaw, and Earth-frame Global Acceleration.
+
+```cpp
+#include <TriSense.h>
+
+TriSense sensor;
 AdvancedTriFusion fusion(&sensor.imu, &sensor.mag);
 
 void setup() {
   sensor.beginAll(MODE_HYBRID);
 
   // --- Apply Calibration Data ---
-  // (Obtain these values using the calibration examples provided)
-  
-  // 1. Accelerometer (Offset & Scale)
-  sensor.imu.setAccelOffset(0.02, -0.01, 0.05); 
+
+  // 1. Accelerometer (Offset & Scale from 6-point calibration)
+  sensor.imu.setAccelOffset(0.02, -0.01, 0.05);
   sensor.imu.setAccelScale(1.00, 1.00, 1.00);
 
-  // 2. Magnetometer (Hard Iron & Soft Iron)
+  // 2. Gyro offsets
+  sensor.imu.setGyroOffset(-0.05, 0.02, 0.10);
+
+  // 3. Magnetometer (Hard Iron & Soft Iron from MotionCal)
   fusion.setMagHardIron(15.5, -40.2, 5.0);
-  float softIron[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
+  float softIron[3][3] = {{1.0, 0.0, 0.0},
+                          {0.0, 1.0, 0.0},
+                          {0.0, 0.0, 1.0}};
   fusion.setMagSoftIron(softIron);
 
-  // 3. Magnetic Declination (Important for True North)
-  // Look up your location (e.g., 5.6 degrees for Central Europe)
+  // 4. Magnetic Declination (e.g., 5.6° for Central Europe)
   fusion.setDeclination(5.6);
 
-  // Initialize the orientation filter (waits for stable data)
+  // 5. Tune adaptive gains (optional)
+  fusion.setAccelGaussian(1.0f, 0.05f);       // trust accel when |total| ≈ 1G
+  fusion.setMagGaussian(50.88f, 3.5f, 15.0f); // trust mag when |field| ≈ 50.88 µT
+  fusion.setYawKi(0.005f);                     // gyro bias learning speed
+
+  // Initialize the orientation filter
   fusion.initOrientation();
 }
-```
 
-### 2. The Loop
-
-Call `update()` as fast as possible in the loop.
-
-```cpp
 void loop() {
   if (fusion.update()) {
     float roll, pitch, yaw;
     fusion.getOrientationDegrees(roll, pitch, yaw);
 
-    // Get Global Acceleration (Earth Frame)
+    // Earth-frame Global Acceleration (gravity removed)
     float ax_g, ay_g, az_g;
     fusion.getGlobalAcceleration(ax_g, ay_g, az_g);
 
-    Serial.print("Roll: "); Serial.print(roll);
+    Serial.print("Roll: ");   Serial.print(roll);
     Serial.print(" Pitch: "); Serial.print(pitch);
-    Serial.print(" Yaw: "); Serial.println(yaw);
+    Serial.print(" Yaw: ");   Serial.println(yaw);
   }
 }
 ```
 
 ---
 
-## Deep Dive: How AdvancedFusion Works
+## Deep Dive: How the Fusion Engines Work
 
-The `AdvancedTriFusion` algorithm is a custom implementation of a Complementary Filter augmented with statistical probability (Gaussian functions). Here is the logic flow:
+### SimpleTriFusion — Pure Gyro Integration
 
-1. **Gyroscope Integration (Prediction):** The core orientation is calculated by integrating the gyroscope angular rates. This provides extremely fast response to movement but suffers from drift over time.
-2. **Accelerometer Correction (Roll/Pitch):** The algorithm measures the gravity vector. It calculates the error between the *estimated* gravity (from the current quaternion) and the *measured* gravity.
-* **Adaptive Gain:** If the total acceleration vector length is not close to 1G (e.g., during vibration or freefall), the algorithm assumes external forces are present. It uses a **Gaussian function** to reduce the Accelerometer's influence (`Gain -> 0`), preventing the horizon from tilting incorrectly during movement.
+1. **FIFO read loop:** Reads all available IMU samples from the FIFO buffer.
+2. **Gyro integration:** Each sample is integrated into the quaternion at time-step `_realDt`.
+3. **ODR tracking:** The engine measures the actual sample rate and adapts `_realDt` via a low-pass filter to compensate for CPU load variations.
+4. **Result:** A fast, low-latency orientation that drifts slowly over time (gyro-only).
 
+### AdvancedTriFusion — Adaptive Complementary Filter
 
-3. **Magnetometer Correction (Yaw):**
-The algorithm aligns the Heading (Yaw) with magnetic North.
-* **Magnetic Anomaly Rejection:** Similar to the accelerometer, if the measured magnetic field strength differs significantly from the calibrated reference (`magRef`), the fusion engine ignores the magnetometer to prevent glitches near motors or iron objects.
-* **Tilt Compensation:** The magnetometer gain is dynamically scaled based on the current Pitch/Roll angles. This prevents the "gimbal lock" effect where pitch changes could mistakenly alter Yaw.
+This is a custom implementation of a quaternion-based complementary filter augmented with statistical probability (Gaussian functions).
 
+**1. Gyroscope Integration (Prediction)**
 
-4. **Gyro Bias Learning (Ki):**
-The system tracks the difference between the Gyro-predicted Yaw and the Magnetometer-corrected Yaw. This error is fed into an integral controller (`Ki`) which slowly adjusts a `gyroBiasZ` variable. This effectively "learns" the gyroscope's resting drift and subtracts it, resulting in a stable heading even if the magnetometer is temporarily unavailable.
+The core orientation is updated by integrating angular rates into the quaternion:
+
+$$\dot{q} = \frac{1}{2} q \otimes \omega$$
+
+where $\omega$ is the gyroscope vector (rad/s). The gyro bias for the Z-axis (`gyroBiasZ`) is subtracted before integration if the Ki controller has learned a value.
+
+**2. Accelerometer Correction (Roll/Pitch)**
+
+The algorithm compares the *estimated* gravity vector (from the current quaternion) with the *measured* gravity vector. The error is computed as the cross-product:
+
+$$e_{acc} = \hat{a}_{measured} \times \hat{a}_{estimated}$$
+
+- **Adaptive Gaussian Gain:** If the total acceleration magnitude deviates from 1 G (e.g., during vibration, free-fall, or linear acceleration), a Gaussian function reduces the accelerometer influence to zero:
+
+$$G_{acc} = \exp\left(-\frac{(||a|| - 1.0)^2}{2 \cdot \sigma_{acc}^2}\right) \cdot Gain_{max}$$
+
+This prevents the horizon from tilting incorrectly during dynamic motion.
+
+**3. Magnetometer Correction (Yaw)**
+
+The engine aligns heading with magnetic North using tilt-compensated magnetic readings:
+
+- **Tilt Compensation:** Raw magnetometer data is rotated by the current roll/pitch to produce horizontal components, from which the corrected yaw is derived.
+- **Magnetic Anomaly Rejection:** If the measured magnetic field strength differs significantly from the calibrated reference (50.88 µT), the magnetometer is ignored via a second Gaussian function.
+- **Tilt-Dependent Scaling:** The magnetometer gain is further scaled by a Gaussian centered at 0° tilt, preventing gimbal-lock artifacts when the board is steeply pitched or rolled:
+
+$$G_{mag} = G_{mag\_raw} \cdot G_{tilt\_roll} \cdot G_{tilt\_pitch}$$
+
+**4. Gyro Bias Learning (Ki Controller)**
+
+The error between the gyro-predicted yaw and the magnetometer-corrected yaw is tracked:
+
+$$\Delta_{yaw} = yaw_{corr} - yaw_{estimate}$$
+
+This error drives an integral controller (`Ki`) which adjusts `gyroBiasZ`:
+
+$$bias_z -= K_i \cdot \Delta_{yaw} \cdot G_{mag} \cdot dt$$
+
+The bias resets to zero if the error crosses zero (sign change), preventing wind-up. This effectively "learns" the gyroscope's resting drift, resulting in a stable heading even if the magnetometer is temporarily unavailable.
+
+**5. Real-Time ODR Drift Tracker**
+
+Both fusion engines measure the actual time between IMU samples every second. If the measured dt is within 15% of the nominal dt, it is blended into `_realDt` using an exponential moving average. This ensures correct quaternion integration regardless of fluctuations in the actual bus read rate.
 
 ---
 
 ## Calibration Guide
 
-To achieve professional-grade results, you must calibrate the sensors.
+To achieve professional-grade results, calibrate the sensors.
 
-### 1. Gyroscope & Accelerometer
+### 1. Gyroscope Calibration
 
-Use the example sketch `TriSense_Calibration.ino`.
+Use `autoCalibrateGyro()`:
 
-* **Gyro:** Keep the board perfectly still and press 'g'. The code will average samples to find the zero-rate offset.
-* **Accel:** Press 'a' to start the guided calibration. You will be asked to hold the sensor in 6 orientations (Z+, Z-, Y+, Y-, X+, X-). The library calculates the Offset and Scale Matrix to map the sensor data to a perfect unit sphere.
+```cpp
+void setup() {
+  sensor.beginAll(MODE_HYBRID);
+  sensor.autoCalibrateGyro(750); // 750 samples (default varies by platform)
+  // Offsets are automatically applied to sensor.imu
+}
+```
 
-### 2. Magnetometer
+Or manually: Keep the board perfectly still. The code averages gyro samples to find zero-rate offsets and stores them as `gyrOffset[3]`.
 
-Use the example sketch `MotionCal_Bridge.ino`.
+### 2. Accelerometer — 6-Point Sphere Fit
+
+Use `autoCalibrateAccel()`:
+
+```cpp
+void setup() {
+  sensor.beginAll(MODE_HYBRID);
+  sensor.autoCalibrateAccel();
+}
+```
+
+The guided calibration asks you to hold the sensor in **6 orientations** (Z+ down, Z- up, Y+ left, Y- right, X+ forward, X- backward). It uses a **gradient descent sphere-fit** algorithm (2000 iterations) to compute:
+
+- **Offset** (bias) — centers the sphere at origin
+- **Scale** (sensitivity) — maps the ellipsoid to a unit sphere
+
+The results are printed to Serial — copy them into your `setup()`:
+
+```
+--- COPY TO SETUP() ---
+IMU.setAccelOffset(0.02345, -0.01123, 0.05167);
+IMU.setAccelScale(1.00123, 0.99876, 1.00234);
+-----------------------
+```
+
+### 3. Magnetometer — MotionCal Tool
+
+Use the `MotionCal_Bridge.ino` example:
 
 1. Upload the sketch to your board.
-2. Download the **MotionCal** software (by Paul Stoffregen).
+2. Download **MotionCal** (by Paul Stoffregen).
 3. Connect MotionCal to the board's serial port.
-4. Rotate the board in figure-8 motions and all directions.
-5. MotionCal will visualize the magnetic field sphere and generate **Hard Iron** (offsets) and **Soft Iron** (matrix) values.
-6. Copy these values into your `setup()` code.
+4. Rotate the board in figure-8 motions in all directions.
+5. MotionCal visualizes the magnetic field sphere and generates **Hard Iron** (offsets) and **Soft Iron** (matrix) values.
+6. Copy these into your `setup()` using `setMagHardIron()` and `setMagSoftIron()`.
 
 ---
 
-## Library Reference
+## ICM-42688-P FIFO Modes
+
+The IMU driver supports three reading modes:
+
+| Mode | Set Via | Precision | RAM Usage | Best For |
+|------|---------|-----------|-----------|----------|
+| **Direct Register** | `setFIFOMode(FIFO_NONE)` | 16-bit | Minimal | Low-rate polling |
+| **16-bit FIFO** | `setFIFOMode(FIFO_16BIT)` | 16-bit | Low | General use (default) |
+| **20-bit High-Res** | `setFIFOMode(FIFO_20BIT_HIRES)` | 20-bit (16×) | Moderate | Precision analysis |
+
+> **Note:** High-res mode is **automatically disabled on AVR** (Arduino Uno, Nano, Mega) to conserve RAM. It forces the accelerometer to ±16 G and gyroscope to ±2000 dps ranges.
+
+---
+
+## API Reference
 
 ### `TriSense` Class
 
-* `beginAll(mode, csPin, freq)`: Initialize all hardware.
-* `resetHardwareOffsets()`: Clears internal IMU registers.
-* `autoCalibrateGyro(samples)`: Calculates and applies gyro offsets internally in the IMU.
+| Method | Description |
+|--------|-------------|
+| `beginAll(mode, csPin, freq)` | Initialize all hardware (Hybrid or I2C-only) |
+| `beginBMP(addr)` | Initialize BMP580 individually |
+| `beginMAG()` | Initialize AK09918C individually |
+| `beginIMU(busType, csPin, freq)` | Initialize ICM-42688-P individually |
+| `resetHardwareOffsets()` | Clear internal IMU offset registers |
+| `autoCalibrateGyro(samples)` | Compute and apply gyro software offsets |
+| `autoCalibrateAccel()` | Guided 6-point accelerometer calibration |
+| `getSnapshot(data)` | Read all sensors into a `TriSenseDataSnapshot` struct |
+| `readPressure()` | Get pressure in Pa (smart-cached) |
+| `readTemperature()` | Get temperature in °C (smart-cached) |
+| `readAltitude(seaLevel)` | Get altitude in meters |
 
-### `AdvancedTriFusion` Class
+### `ICM42688P` Class
 
-* `setAccelGaussian(ref, sigma)`: Tune how strictly the filter rejects external acceleration (Default ref=1.0, sigma=0.02).
-* `setMagGaussian(ref, sigma)`: Tune magnetic interference rejection.
-* `setYawKi(ki)`: Adjust the speed of gyro bias learning (Higher = faster correction, Lower = smoother).
-* `getGlobalAcceleration(x, y, z)`: Returns linear acceleration in Gs, with gravity removed, rotated to the Earth frame.
+| Method | Description |
+|--------|-------------|
+| `begin(busType, csPin, freq, i2cAddr, sck, miso, mosi)` | Full initialization with pin mapping |
+| `beginI2C(freq, addr, sda, scl)` | I2C-specific init |
+| `beginSPI(csPin, freq, sck, miso, mosi)` | SPI-specific init |
+| `setODR(odr)` | Set output data rate |
+| `setAccelFS(fs)` | Set accelerometer full-scale range |
+| `setGyroFS(fs)` | Set gyroscope full-scale range |
+| `setFIFOMode(mode)` | Select FIFO reading mode |
+| `readIMU(ax, ay, az, gx, gy, gz)` | Read based on current FIFO mode |
+| `readFIFO(ax, ay, az, gx, gy, gz)` | Alias for `readIMU()` |
+| `readTemperature()` | Read internal IMU temperature |
+| `setAccelOffset(x, y, z)` | Set software accelerometer offsets |
+| `setAccelScale(x, y, z)` | Set software accelerometer scale factors |
+| `setGyroOffset(x, y, z)` | Set software gyroscope offsets |
+| `getODRHz()` | Get current ODR in Hz |
+| `autoCalibrateGyro(samples)` | Auto-calibrate gyroscope bias |
+| `autoCalibrateAccel()` | 6-point sphere fit calibration |
+
+### `BMP580` Class
+
+| Method | Description |
+|--------|-------------|
+| `begin(addr)` | Initialize with I2C address (auto-failover to secondary) |
+| `setI2CSpeed(speed)` | Set I2C clock speed (100k, 400k, or 1 MHz) |
+| `setOversampling(osr_p, osr_t)` | Set pressure and temp oversampling |
+| `setODR(odr)` | Set output data rate (0.125 Hz to 240 Hz) |
+| `setPowerMode(mode)` | Set power mode (Standby, Normal, Forced, Continuous) |
+| `setIIRFilter(iir_p, iir_t)` | Set IIR filter coefficients for pressure/temp |
+| `readTemperature()` | Get temperature (°C) — smart-cached |
+| `readPressure()` | Get pressure (Pa) — smart-cached |
+| `readAltitude(seaLevel)` | Get altitude (m) using cached pressure |
+
+### `AK09918C` Class
+
+| Method | Description |
+|--------|-------------|
+| `begin(odr, wire)` | Initialize with I2C bus reference |
+| `beginI2C(freq, sda, scl, odr)` | Standalone init with optional pin config |
+| `readData()` | Read magnetic data (early-exit on ST1) |
+| `setODR(odr)` | Set output data rate (10, 20, 50, or 100 Hz) |
+| `setMode(mode)` | Set operation mode (Power-down, Single, Self-test) |
+| `softReset()` | Hardware reset |
+
+**Public members:**
+- `float x, y, z` — Field strength in µT
+- `int16_t x_raw, y_raw, z_raw` — Raw ADC values
+- `bool overflow` — Magnetic saturation flag
+
+### `TriSenseFusion` Base Class
+
+| Method | Description |
+|--------|-------------|
+| `initOrientation(samples)` | Initialize quaternion from initial accel/mag readings |
+| `calibrateAccelStatic(samples)` | Simple static gravity offset calibration |
+| `getOrientationDegrees(roll, pitch, yaw)` | Get orientation in degrees (0–360° yaw) |
+| `getGlobalAcceleration(x, y, z)` | Get Earth-frame linear acceleration (Gs) |
+| `setAccelGaussian(ref, sigma)` | Tune accelerometer trust function |
+| `setMagGaussian(ref, sigma)` | Tune magnetometer trust function |
+| `setMagGaussian(ref, sigma, tiltSigma)` | Tune with explicit tilt sigma |
+| `setMagTiltSigma(sigmaDeg)` | Set tilt-dependent magnetometer gain sigma |
+| `setDeclination(deg)` | Set magnetic declination for true north |
+| `setMagHardIron(x, y, z)` | Set magnetometer hard-iron offsets |
+| `setMagSoftIron(matrix[3][3])` | Set magnetometer soft-iron matrix |
+| `setYawKi(ki)` | Set yaw bias learning rate |
+| `setMaxGains(accelGain, magGain)` | Set maximum correction gains |
+| `setMagCheckInterval(ms)` | Set how often to poll the magnetometer |
+
+### `SimpleTriFusion` — `update()`
+
+Processes all available IMU FIFO data, integrates gyroscope into quaternion, and updates the ODR tracker. Returns `true` if at least one new sample was processed.
+
+### `AdvancedTriFusion` — `update()`
+
+Processes all available IMU FIFO data, performs gyro integration with bias subtraction, periodically reads the magnetometer, and applies the complementary correction (accelerometer + magnetometer) with adaptive Gaussian gains. Returns `true` if at least one new IMU sample was processed.
+
+---
+
+## Configuration Macros
+
+Define these *before* including `TriSense.h` to override defaults:
+
+| Macro | Effect |
+|-------|--------|
+| `FORCE_FUSION_FLOAT` | Force `FUSION_MATH_TYPE` to `float` |
+| `FORCE_FUSION_DOUBLE` | Force `FUSION_MATH_TYPE` to `double` |
+
+---
 
 ## License
 
