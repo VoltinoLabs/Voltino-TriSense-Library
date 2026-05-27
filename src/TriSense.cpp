@@ -1,6 +1,7 @@
 #include "TriSense.h"
 
-TriSense::TriSense() : mag(Wire) {}
+// --- OPRAVA: Odstraněno : mag(Wire), AK09918C se umí inicializovat samo ---
+TriSense::TriSense() {}
 
 bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
   _mode = mode;
@@ -375,6 +376,7 @@ bool AdvancedTriFusion::update() {
      }
   }
 
+  // Těžká korekce - zavolá se pouze jednou na konci s využitím zjištěného časového rozdílu
   unsigned long correctionDeltaUs = now - lastSuccessfulCorrectionTime;
   FUSION_MATH_TYPE correction_dt = (FUSION_MATH_TYPE)correctionDeltaUs / 1000000.0;
   
