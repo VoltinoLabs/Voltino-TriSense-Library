@@ -85,6 +85,7 @@ void TriSenseFusion::setMagSoftIron(float matrix[3][3]) { for(int i=0; i<3; i++)
 void TriSenseFusion::setYawKi(float ki) { yawKi = ki; }
 void TriSenseFusion::setMaxGains(float accelGain, float magGain) { maxAccelGain = accelGain; maxMagGain = magGain; }
 void TriSenseFusion::setMagCheckInterval(float intervalMs) { magCheckIntervalUs = (unsigned long)(intervalMs * 1000.0f); }
+void TriSenseFusion::setLocalGravity(float g) { _localGravity = g; }
 
 void TriSenseFusion::calibrateAccelStatic(int samples) {
   double sumX=0, sumY=0, sumZ=0; 
@@ -137,7 +138,7 @@ void TriSenseFusion::initOrientation(int samples) {
   q[2] = c1*s2*c3 + s1*c2*s3; 
   q[3] = s1*c2*c3 - c1*s2*s3;
 
-  // Tracker inicializace reálného ODR
+  // Inicializace trackeru reálného ODR podle nastavení čipu
   int nominalHz = _imu->getODRHz();
   _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
   _lastOdrCheckTime = micros();
@@ -175,15 +176,35 @@ void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE a
   if (yaw < 0) yaw += 360.0; if (yaw >= 360.0) yaw -= 360.0;
 }
 
-void TriSenseFusion::getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g) {
+void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
   FUSION_MATH_TYPE qw = q[0], qx = q[1], qy = q[2], qz = q[3]; 
   FUSION_MATH_TYPE x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
   FUSION_MATH_TYPE xx = qx * x2, xy = qx * y2, xz = qx * z2; 
   FUSION_MATH_TYPE yy = qy * y2, yz = qy * z2, zz = qz * z2; 
   FUSION_MATH_TYPE wx = qw * x2, wy = qw * y2, wz = qw * z2;
-  ax_g = (float)((1.0 - (yy + zz)) * lastAx + (xy - wz) * lastAy + (xz + wy) * lastAz);
-  ay_g = (float)((xy + wz) * lastAx + (1.0 - (xx + zz)) * lastAy + (yz - wx) * lastAz);
-  az_g = (float)((xz - wy) * lastAx + (yz + wx) * lastAy + (1.0 - (xx + yy)) * lastAz);
+  
+  FUSION_MATH_TYPE ax_g = (1.0 - (yy + zz)) * lastAx + (xy - wz) * lastAy + (xz + wy) * lastAz;
+  FUSION_MATH_TYPE ay_g = (xy + wz) * lastAx + (1.0 - (xx + zz)) * lastAy + (yz - wx) * lastAz;
+  FUSION_MATH_TYPE az_g = (xz - wy) * lastAx + (yz + wx) * lastAy + (1.0 - (xx + yy)) * lastAz;
+
+  if (unit == ACCEL_UNIT_MS2) {
+     ax = (float)(ax_g * _localGravity);
+     ay = (float)(ay_g * _localGravity);
+     az = (float)(az_g * _localGravity);
+  } else {
+     ax = (float)ax_g;
+     ay = (float)ay_g;
+     az = (float)az_g;
+  }
+}
+
+void TriSenseFusion::getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
+  getGlobalAcceleration(ax, ay, az, unit);
+  if (unit == ACCEL_UNIT_MS2) {
+     az -= _localGravity; 
+  } else {
+     az -= 1.0f;           
+  }
 }
 
 void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz, FUSION_MATH_TYPE dt) {
@@ -227,6 +248,7 @@ bool SimpleTriFusion::update() {
   
   unsigned long now = micros(); 
   
+  // Real-time kompenzace RC oscilátoru 
   if (now - _lastOdrCheckTime >= 1000000UL) { 
       if (_lastOdrCheckTime != 0 && _sampleCount > 0) {
           FUSION_MATH_TYPE measuredDt = (FUSION_MATH_TYPE)(now - _lastOdrCheckTime) / 1000000.0 / (FUSION_MATH_TYPE)_sampleCount;
@@ -353,6 +375,7 @@ bool AdvancedTriFusion::update() {
      }
   }
 
+  // Těžká korekce - zavolá se pouze jednou na konci s využitím zjištěného časového rozdílu
   unsigned long correctionDeltaUs = now - lastSuccessfulCorrectionTime;
   FUSION_MATH_TYPE correction_dt = (FUSION_MATH_TYPE)correctionDeltaUs / 1000000.0;
   
