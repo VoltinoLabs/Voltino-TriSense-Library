@@ -5,16 +5,31 @@
 #include <Wire.h>
 #include <SPI.h>
 #include "BMP580.h"
+
+// ---------------------------------------------------------
+// ŘEŠENÍ KONFLIKTU ENUMERÁTORŮ (NAMESPACE POLLUTION)
+// ---------------------------------------------------------
+// Bez zásahu do původních knihoven využijeme preprocesor k dynamickému
+// přejmenování kolidujících ODR hodnot pro AK09918C. Tím oddělíme IMU a MAG.
+#define ODR_10HZ  AK_ODR_10HZ
+#define ODR_20HZ  AK_ODR_20HZ
+#define ODR_50HZ  AK_ODR_50HZ
+#define ODR_100HZ AK_ODR_100HZ
+
 #include "AK09918C.h"
+
+// Zrušíme makra, aby si ICM42688P mohlo definovat své vlastní ODR enums
+#undef ODR_10HZ
+#undef ODR_20HZ
+#undef ODR_50HZ
+#undef ODR_100HZ
+// ---------------------------------------------------------
+
 #include "ICM42688P_voltino.h"
 
 // ---------------------------------------------------------
 // DYNAMIC ARCHITECTURE DETECTION & OPTIMIZATION
 // ---------------------------------------------------------
-// Odkomentováním jedné z těchto direktiv můžeš manuálně vynutit přesnost
-// #define FORCE_FUSION_FLOAT
-// #define FORCE_FUSION_DOUBLE
-
 #if defined(FORCE_FUSION_DOUBLE)
   #define FUSION_MATH_TYPE double
   #define DEFAULT_IMU_ODR ODR_1KHZ
@@ -26,50 +41,43 @@
   #define DEFAULT_IMU_SPI_ODR ODR_4KHZ
   #define DEFAULT_CALIBRATION_SAMPLES 1000
 #elif defined(__AVR__)
-  // Arduino Uno/Nano: Low memory, slow CPU. Use float, lower ODR, fewer samples.
   #define FUSION_MATH_TYPE float
   #define DEFAULT_IMU_ODR ODR_100HZ
   #define DEFAULT_IMU_SPI_ODR ODR_500HZ
   #define DEFAULT_CALIBRATION_SAMPLES 200
 #elif defined(ESP32)
-  // ESP32: Fast CPU, handles double precision efficiently. High ODR.
   #define FUSION_MATH_TYPE double
   #define DEFAULT_IMU_ODR ODR_1KHZ
   #define DEFAULT_IMU_SPI_ODR ODR_8KHZ
   #define DEFAULT_CALIBRATION_SAMPLES 1000
 #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
-  // RP2040/RP2350: Extremely fast DSP with hardware FPU.
-  // Using float here is optimal to leverage single-cycle FPU instructions.
   #define FUSION_MATH_TYPE float
   #define DEFAULT_IMU_ODR ODR_1KHZ
   #define DEFAULT_IMU_SPI_ODR ODR_8KHZ
   #define DEFAULT_CALIBRATION_SAMPLES 1000
 #else
-  // Fallback for any other/unrecognized architectures
   #define FUSION_MATH_TYPE float
   #define DEFAULT_IMU_ODR ODR_200HZ
   #define DEFAULT_IMU_SPI_ODR ODR_1KHZ
   #define DEFAULT_CALIBRATION_SAMPLES 500
 #endif
 
-// Unified structural container for all synchronous raw sensor metrics
+// --- NOVÉ JEDNOTKY PRO ZRYCHLENÍ ---
+enum AccelUnit {
+  ACCEL_UNIT_G,      // Násobky gravitačního zrychlení (G)
+  ACCEL_UNIT_MS2     // Metry za sekundu na druhou (m/s^2)
+};
+
 struct TriSenseDataSnapshot {
-  float accelX;
-  float accelY;
-  float accelZ;
-  float gyroX;
-  float gyroY;
-  float gyroZ;
-  float magX;
-  float magY;
-  float magZ;
-  float pressure;
-  float temperature;
+  float accelX; float accelY; float accelZ;
+  float gyroX; float gyroY; float gyroZ;
+  float magX; float magY; float magZ;
+  float pressure; float temperature;
 };
 
 enum TriSenseMode {
   MODE_I2C,
-  MODE_HYBRID   // AK and BMP on I2C, ICM on SPI
+  MODE_HYBRID   
 };
 
 class TriSense {
@@ -81,7 +89,9 @@ public:
   TriSense();
   
   bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000);
-  bool beginBMP(uint8_t addr = BMP580_DEFAULT_I2C_ADDR);
+  
+  // OPRAVENO: BMP580_PRIMARY_I2C_ADDR
+  bool beginBMP(uint8_t addr = BMP580_PRIMARY_I2C_ADDR);
   bool beginMAG();
   bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t freq = 4000000);
 
@@ -89,10 +99,7 @@ public:
   void autoCalibrateGyro(uint16_t samples = DEFAULT_CALIBRATION_SAMPLES);
   void autoCalibrateAccel(); 
 
-  // Unified single-call hardware snapshot data layer
   bool getSnapshot(TriSenseDataSnapshot &data);
-
-  // Direct BMP580 abstraction wrapper layer
   float readPressure();
   float readTemperature();
   float readAltitude(float seaLevelPressure = 1013.25f);
@@ -106,18 +113,19 @@ public:
   ICM42688P* _imu;
   AK09918C* _mag;
   
-  // Dynamic Math Types for Core Fusion calculations
   FUSION_MATH_TYPE q[4] = {1.0, 0.0, 0.0, 0.0};
   FUSION_MATH_TYPE lastAx = 0, lastAy = 0, lastAz = 0;
   FUSION_MATH_TYPE lastGx = 0, lastGy = 0, lastGz = 0;
   FUSION_MATH_TYPE lastMx = 0, lastMy = 0, lastMz = 0;
   
-  // Configuration arrays kept as standard float (memory efficient, no DSP loss)
   float accelOffset[3] = {0.0f, 0.0f, 0.0f};      
   float gyroOffset[3] = {0.0f, 0.0f, 0.0f};       
   float magHardIron[3] = {0.0f, 0.0f, 0.0f};      
   float magSoftIron[3][3] = {{1,0,0},{0,1,0},{0,0,1}}; 
   
+  // --- LOKÁLNÍ GRAVITACE ---
+  float _localGravity = 9.80665f; // Standardní gravitace (můžeme přepsat)
+
   float accRef = 1.0f;          
   float accSigma = 0.05f;       
   float magRef = 50.88f;         
@@ -128,14 +136,12 @@ public:
   float maxAccelGain = 0.1f;    
   float maxMagGain = 0.1f;      
   
-  unsigned long magCheckIntervalUs = 5000; // Zvýšeno pro Advanced fusion
+  unsigned long magCheckIntervalUs = 5000; 
 
-  // --- Real-time ODR Drift Tracker Variables ---
   uint32_t _sampleCount = 0;
   unsigned long _lastOdrCheckTime = 0;
   FUSION_MATH_TYPE _realDt = 0.001; 
 
-  // Internal high-precision math
   FUSION_MATH_TYPE gaussianGain(FUSION_MATH_TYPE x, FUSION_MATH_TYPE mu, FUSION_MATH_TYPE sigma);
   void gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz, FUSION_MATH_TYPE dt);
   void getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE ay, FUSION_MATH_TYPE az, 
@@ -150,9 +156,12 @@ public:
   void calibrateAccelStatic(int samples = DEFAULT_CALIBRATION_SAMPLES);
   void initOrientation(int samples = DEFAULT_CALIBRATION_SAMPLES);
   
-  // Public user API retained as float for backwards sketch compatibility
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
-  void getGlobalAcceleration(float& ax_g, float& ay_g, float& az_g);
+  
+  // --- NOVÉ AKCELERAČNÍ API ---
+  void setLocalGravity(float g); // Nastavení přesného G pro danou lokaci
+  void getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
+  void getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
   
   void setAccelGaussian(float ref, float sigma);
   void setMagGaussian(float ref, float sigma, float tiltSigma); 

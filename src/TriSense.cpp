@@ -16,13 +16,15 @@ bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
     imu.setODR(DEFAULT_IMU_SPI_ODR); 
   }
 
-  // --- KRITICKÁ OPRAVA: Zapnutí FIFO, aby fungoval 'while' cyklus ve fúzi ---
+  // --- KRITICKÁ OPRAVA: Zapnutí FIFO ---
   imu.setFIFOMode(FIFO_16BIT);
 
   bmp.setOversampling(BMP580_OSR_x2, BMP580_OSR_x2);
   bmp.setODR(BMP580_ODR_240Hz);
   bmp.setPowerMode(BMP580_MODE_NORMAL);
-  mag.setODR(100); 
+  
+  // OPRAVENO: Použití čistého enumu chráněného makrem z TriSense.h
+  mag.setODR(AK_ODR_100HZ); 
   
   return true;
 }
@@ -138,7 +140,6 @@ void TriSenseFusion::initOrientation(int samples) {
   q[2] = c1*s2*c3 + s1*c2*s3; 
   q[3] = s1*c2*c3 - c1*s2*s3;
 
-  // Inicializace trackeru reálného ODR podle nastavení čipu
   int nominalHz = _imu->getODRHz();
   _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
   _lastOdrCheckTime = micros();
@@ -248,7 +249,6 @@ bool SimpleTriFusion::update() {
   
   unsigned long now = micros(); 
   
-  // Real-time kompenzace RC oscilátoru 
   if (now - _lastOdrCheckTime >= 1000000UL) { 
       if (_lastOdrCheckTime != 0 && _sampleCount > 0) {
           FUSION_MATH_TYPE measuredDt = (FUSION_MATH_TYPE)(now - _lastOdrCheckTime) / 1000000.0 / (FUSION_MATH_TYPE)_sampleCount;
@@ -375,7 +375,6 @@ bool AdvancedTriFusion::update() {
      }
   }
 
-  // Těžká korekce - zavolá se pouze jednou na konci s využitím zjištěného časového rozdílu
   unsigned long correctionDeltaUs = now - lastSuccessfulCorrectionTime;
   FUSION_MATH_TYPE correction_dt = (FUSION_MATH_TYPE)correctionDeltaUs / 1000000.0;
   
