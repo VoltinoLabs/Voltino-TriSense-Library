@@ -78,7 +78,12 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
 
     Wire.beginTransmission(_i2cAddr);
     if (Wire.endTransmission() != 0) {
-      _i2cAddr = (_i2cAddr == ICM_ADDR_PRIMARY) ? ICM_ADDR_SECONDARY : ICM_ADDR_PRIMARY;
+      // Safe fallback probe if primary address does not ACK immediately
+      uint8_t altAddr = (_i2cAddr == ICM_ADDR_PRIMARY) ? ICM_ADDR_SECONDARY : ICM_ADDR_PRIMARY;
+      Wire.beginTransmission(altAddr);
+      if (Wire.endTransmission() == 0) {
+        _i2cAddr = altAddr;
+      }
     }
   }
   
@@ -388,16 +393,29 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
   uint8_t buffer[20];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 20);
 
+  // Check valid header (HEADER_MSG bit 7 must be 0)
   if ((buffer[0] & 0x80) != 0) return false;
 
-  int32_t rawAx = (int32_t)((buffer[1] << 24) | (buffer[2] << 16) | (buffer[3] << 8)) >> 12;
-  int32_t rawAy = (int32_t)((buffer[4] << 24) | (buffer[5] << 16) | (buffer[6] << 8)) >> 12;
-  int32_t rawAz = (int32_t)((buffer[7] << 24) | (buffer[8] << 16) | (buffer[9] << 8)) >> 12;
+  // 20-bit extraction and sign extension (Packet Format 4)
+  int32_t rawAx = (int32_t)( ((uint32_t)buffer[1] << 12) | ((uint32_t)buffer[2] << 4) | (buffer[17] & 0x0F) );
+  rawAx = (rawAx << 12) >> 12;
   
-  int32_t rawGx = (int32_t)((buffer[10] << 24) | (buffer[11] << 16) | (buffer[12] << 8)) >> 12;
-  int32_t rawGy = (int32_t)((buffer[13] << 24) | (buffer[14] << 16) | (buffer[15] << 8)) >> 12;
-  int32_t rawGz = (int32_t)((buffer[16] << 24) | (buffer[17] << 16) | (buffer[18] << 8)) >> 12;
+  int32_t rawAy = (int32_t)( ((uint32_t)buffer[3] << 12) | ((uint32_t)buffer[4] << 4) | (buffer[18] >> 4) );
+  rawAy = (rawAy << 12) >> 12;
 
+  int32_t rawAz = (int32_t)( ((uint32_t)buffer[5] << 12) | ((uint32_t)buffer[6] << 4) | (buffer[19] >> 4) );
+  rawAz = (rawAz << 12) >> 12;
+  
+  int32_t rawGx = (int32_t)( ((uint32_t)buffer[7] << 12) | ((uint32_t)buffer[8] << 4) | (buffer[17] >> 4) );
+  rawGx = (rawGx << 12) >> 12;
+  
+  int32_t rawGy = (int32_t)( ((uint32_t)buffer[9] << 12) | ((uint32_t)buffer[10] << 4) | (buffer[18] & 0x0F) );
+  rawGy = (rawGy << 12) >> 12;
+
+  int32_t rawGz = (int32_t)( ((uint32_t)buffer[11] << 12) | ((uint32_t)buffer[12] << 4) | (buffer[19] & 0x0F) );
+  rawGz = (rawGz << 12) >> 12;
+
+  // In 20-bit mode, FSR is fixed to 16g and 2000dps
   float scaleAccel20 = 16.0f / 524288.0f;
   float scaleGyro20  = 2000.0f / 524288.0f;
 

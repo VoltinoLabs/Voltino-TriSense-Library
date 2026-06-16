@@ -3,7 +3,7 @@
 #include <Wire.h>
 #include <SPI.h>
 
-// Definice registrů
+// Register definitions
 #define ICM42688_REG_DEVICE_CONFIG 0x11
 #define ICM42688_REG_DRIVE_CONFIG  0x13
 #define ICM42688_REG_INT_CONFIG    0x14
@@ -67,23 +67,23 @@ enum ICM_ODR {
 };
 
 enum ICM_FIFO_MODE {
-  FIFO_NONE = 0,        // Klasické čtení z registrů (bez FIFO)
-  FIFO_16BIT = 1,       // 16-bitové FIFO (Packet format 3)
-  FIFO_20BIT_HIRES = 2  // 20-bitové High-Res FIFO (Packet format 4)
+  FIFO_NONE = 0,        // Standard register read (no FIFO)
+  FIFO_16BIT = 1,       // 16-bit FIFO (Packet format 3)
+  FIFO_20BIT_HIRES = 2  // 20-bit High-Res FIFO (Packet format 4)
 };
 
 class ICM42688P {
 public:
   ICM42688P();
   
-  // --- Inicializace ---
+  // --- Initialization ---
   bool beginI2C(uint32_t freq = 0, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sdaPin = -1, int8_t sclPin = -1);
   bool beginSPI(int8_t csPin, uint32_t freq = 0, int8_t sckPin = -1, int8_t misoPin = -1, int8_t mosiPin = -1);
   bool begin(ICM_BUS busType, int8_t csPin = -1, uint32_t freq = 0, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sckSclPin = -1, int8_t misoSdaPin = -1, int8_t mosiPin = -1);
   
   void setDebug(bool enable);
 
-  // --- Konfigurace ---
+  // --- Configuration ---
   void setODR(ICM_ODR odr);
   void setAccelFS(ICM_ACCEL_FS fs);
   void setGyroFS(ICM_GYRO_FS fs);
@@ -91,17 +91,17 @@ public:
   
   int getODRHz(); 
   
-  // --- Čtení dat ---
+  // --- Data reading ---
   bool readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   float readTemperature();
 
-  // Wrappery a specifické metody pro přímé volání
+  // Wrappers and specific methods for direct calls
   bool readSensorData(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   bool readHardwareFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   bool readHardwareFIFOHires(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   bool readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
 
-  // --- Kalibrace ---
+  // --- Calibration ---
   void resetHardwareOffsets();
   void autoCalibrateGyro(uint16_t samples = 750);
   void autoCalibrateAccel(); 
@@ -114,7 +114,7 @@ public:
   void getAccelSoftwareOffset(float &ox, float &oy, float &oz);
   void getAccelSoftwareScale(float &sx, float &sy, float &sz);
 
-  // Zkrácené názvy pro kompatibilitu
+  // Short names for backward compatibility
   void setGyroOffset(float ox, float oy, float oz);
   void setAccelOffset(float ox, float oy, float oz);
   void setAccelScale(float sx, float sy, float sz);
