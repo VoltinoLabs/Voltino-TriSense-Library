@@ -95,14 +95,13 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   float ax, ay, az, gx, gy, gz;
   int count = 0;
   
-  // [VOLTINO FIX] Zajištěno přičítání pouze tehdy, když jsou data připravena. Zabrání falešným offsetům.
   while(count < samples) { 
     if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
       sumX += ax; sumY += ay; sumZ += az; 
       count++;
       delay(1); 
     } else {
-      delay(1); // Uvolnění sběrnice
+      delay(1); 
     }
   }
   
@@ -118,7 +117,6 @@ void TriSenseFusion::initOrientation(int samples) {
   while(count < samples) {
      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
      
-     // [VOLTINO FIX] Oddělené čtení zabraňuje zahlcení (hammering) a blokování sběrnice I2C/SPI
      bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
      bool magReady = false;
      if (imuReady) {
@@ -142,7 +140,6 @@ void TriSenseFusion::initOrientation(int samples) {
          mxSum+=mx; mySum+=my; mzSum+=mz; 
          count++; delay(2);
      } else {
-         // Pokud data nejsou, uvolníme CPU a sběrnici
          delay(1);
      }
   }
@@ -165,7 +162,6 @@ void TriSenseFusion::initOrientation(int samples) {
   int nominalHz = _imu->getODRHz();
   _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
   
-  // Tímto resetem zamezíme masivnímu výbuchu filtru u SimpleFusion na prvním kroku
   _lastOdrCheckTime = micros();
   _sampleCount = 0;
 }
@@ -252,7 +248,8 @@ bool SimpleTriFusion::update() {
   float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw; 
   bool dataProcessed = false;
   
-  while (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
+  // [VOLTINO FIX] Odstraněna infinite-loop (while). Použito bezpečné 'if'.
+  if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
       _sampleCount++;
       
@@ -352,7 +349,8 @@ bool AdvancedTriFusion::update() {
   float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw; 
   bool dataProcessed = false;
   
-  while (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
+  // [VOLTINO FIX] Odstraněna infinite-loop (while). Použito bezpečné 'if'.
+  if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
       _sampleCount++;
       
