@@ -410,4 +410,3 @@ bool AdvancedTriFusion::update() {
 
   return true;
 }
-}
