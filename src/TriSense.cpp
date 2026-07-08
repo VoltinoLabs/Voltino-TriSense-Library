@@ -93,11 +93,19 @@ void TriSenseFusion::setLocalGravity(float g) { _localGravity = g; }
 void TriSenseFusion::calibrateAccelStatic(int samples) {
   double sumX=0, sumY=0, sumZ=0; 
   float ax, ay, az, gx, gy, gz;
-  for(int i=0; i<samples; i++) { 
-    _imu->readFIFO(ax, ay, az, gx, gy, gz); 
-    sumX += ax; sumY += ay; sumZ += az; 
-    delay(1); 
+  int count = 0;
+  
+  // [VOLTINO FIX] Zajištěno přičítání pouze tehdy, když jsou data připravena. Zabrání falešným offsetům.
+  while(count < samples) { 
+    if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
+      sumX += ax; sumY += ay; sumZ += az; 
+      count++;
+      delay(1); 
+    } else {
+      delay(1); // Uvolnění sběrnice
+    }
   }
+  
   accelOffset[0] = (float)(sumX / samples) - 0.0f; 
   accelOffset[1] = (float)(sumY / samples) - 0.0f; 
   accelOffset[2] = (float)(sumZ / samples) - 1.0f; 
@@ -106,9 +114,18 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
 void TriSenseFusion::initOrientation(int samples) {
   FUSION_MATH_TYPE axSum=0, aySum=0, azSum=0, mxSum=0, mySum=0, mzSum=0; 
   int count = 0;
+  
   while(count < samples) {
      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
-     if(_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw) && _mag->readData()) {
+     
+     // [VOLTINO FIX] Oddělené čtení zabraňuje zahlcení (hammering) a blokování sběrnice I2C/SPI
+     bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
+     bool magReady = false;
+     if (imuReady) {
+         magReady = _mag->readData();
+     }
+
+     if(imuReady && magReady) {
          FUSION_MATH_TYPE ax = ax_raw - accelOffset[0]; 
          FUSION_MATH_TYPE ay = ay_raw - accelOffset[1]; 
          FUSION_MATH_TYPE az = az_raw - accelOffset[2]; 
@@ -124,8 +141,12 @@ void TriSenseFusion::initOrientation(int samples) {
          
          mxSum+=mx; mySum+=my; mzSum+=mz; 
          count++; delay(2);
+     } else {
+         // Pokud data nejsou, uvolníme CPU a sběrnici
+         delay(1);
      }
   }
+  
   FUSION_MATH_TYPE r, p, y; 
   getCorrectionAngles(axSum/samples, aySum/samples, azSum/samples, mxSum/samples, mySum/samples, mzSum/samples, r, p, y);
   
@@ -143,6 +164,8 @@ void TriSenseFusion::initOrientation(int samples) {
 
   int nominalHz = _imu->getODRHz();
   _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
+  
+  // Tímto resetem zamezíme masivnímu výbuchu filtru u SimpleFusion na prvním kroku
   _lastOdrCheckTime = micros();
   _sampleCount = 0;
 }
@@ -386,4 +409,5 @@ bool AdvancedTriFusion::update() {
   lastSuccessfulCorrectionTime = now;
 
   return true;
+}
 }
