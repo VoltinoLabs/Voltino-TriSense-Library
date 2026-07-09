@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <SPI.h>
 
+// Definice registrů
 #define ICM42688_REG_DEVICE_CONFIG 0x11
 #define ICM42688_REG_DRIVE_CONFIG  0x13
 #define ICM42688_REG_INT_CONFIG    0x14
@@ -10,6 +11,10 @@
 #define ICM42688_REG_TEMP_DATA1    0x1D
 #define ICM42688_REG_ACCEL_DATA_X1 0x1F
 #define ICM42688_REG_GYRO_DATA_X1  0x25
+#define ICM42688_REG_FIFO_COUNTH   0x2E 
+#define ICM42688_REG_FIFO_COUNTL   0x2F 
+#define ICM42688_REG_FIFO_DATA     0x30 
+#define ICM42688_REG_SIGNAL_PATH_RESET 0x4B
 #define ICM42688_REG_TMST_CONFIG   0x54
 #define ICM42688_REG_APEX_CONFIG0  0x56
 #define ICM42688_REG_SMD_CONFIG    0x57
@@ -22,11 +27,10 @@
 #define ICM42688_REG_PWR_MGMT0     0x4E
 #define ICM42688_REG_GYRO_CONFIG0  0x4F
 #define ICM42688_REG_ACCEL_CONFIG0 0x50
-#define ICM42688_REG_FIFO_COUNTH   0x2E
-#define ICM42688_REG_FIFO_DATA     0x30
 
-#define ICM_ADDR 0x68
-#define WHO_AM_I_EXPECTED 0x47
+#define ICM_ADDR_PRIMARY   0x68
+#define ICM_ADDR_SECONDARY 0x69
+#define WHO_AM_I_EXPECTED  0x47
 
 enum ICM_BUS { BUS_I2C, BUS_SPI };
 enum ICM_ACCEL_FS { AFS_16G = 0, AFS_8G = 1, AFS_4G = 2, AFS_2G = 3 };
@@ -37,8 +41,13 @@ enum ICM_FIFO_MODE { FIFO_NONE, FIFO_16BIT, FIFO_20BIT_HIRES };
 class ICM42688P {
 public:
   ICM42688P();
-  bool begin(ICM_BUS busType, uint8_t pin = 0, uint32_t freq = 4000000);
   
+  void setDebug(bool enable);
+
+  bool beginI2C(uint32_t freq = 400000, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sdaPin = -1, int8_t sclPin = -1);
+  bool beginSPI(int8_t csPin, uint32_t freq = 4000000, int8_t sckPin = -1, int8_t misoPin = -1, int8_t mosiPin = -1);
+  bool begin(ICM_BUS busType, int8_t csPin = -1, uint32_t freq = 0, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sckSclPin = -1, int8_t misoSdaPin = -1, int8_t mosiPin = -1);
+
   void setODR(ICM_ODR odr);
   void setAccelFS(ICM_ACCEL_FS fs);
   void setGyroFS(ICM_GYRO_FS fs);
@@ -47,10 +56,12 @@ public:
   ICM_FIFO_MODE getFIFOMode();
   int getODRHz();
 
+  bool readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   bool readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   float readTemperature();
 
   void resetHardwareOffsets();
+  
   void setGyroSoftwareOffset(float ox, float oy, float oz);
   void setAccelSoftwareOffset(float ox, float oy, float oz);
   void setAccelSoftwareScale(float sx, float sy, float sz);
@@ -62,20 +73,32 @@ public:
   void setGyroOffset(float ox, float oy, float oz);
   void setAccelOffset(float ox, float oy, float oz);
   void setAccelScale(float sx, float sy, float sz);
+  
   void getGyroOffset(float &ox, float &oy, float &oz);
   void getAccelOffset(float &ox, float &oy, float &oz);
   void getAccelScale(float &sx, float &sy, float &sz);
+
+  float getAccelOffsetX();
+  float getAccelOffsetY();
+  float getAccelOffsetZ();
+  float getAccelScaleX();
+  float getAccelScaleY();
+  float getAccelScaleZ();
+  float getGyroOffsetX();
+  float getGyroOffsetY();
+  float getGyroOffsetZ();
 
   void autoCalibrateGyro(uint16_t samples = 750);
   void autoCalibrateAccel(); 
 
 private:
   ICM_BUS _bus;
-  uint8_t _csPin;
-  uint8_t _i2cAddr = ICM_ADDR;
+  int8_t _csPin;
+  uint8_t _i2cAddr;
   uint32_t _spiFreq;
   ICM_ODR _odr;
   ICM_FIFO_MODE _fifoMode;
+  bool _debug;
 
   float _accelScaleFactor;
   float _gyroScaleFactor;
