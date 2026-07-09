@@ -3,6 +3,7 @@
 #include <Wire.h>
 #include <SPI.h>
 
+// Register definitions
 #define ICM42688_REG_DEVICE_CONFIG 0x11
 #define ICM42688_REG_DRIVE_CONFIG  0x13
 #define ICM42688_REG_INT_CONFIG    0x14
@@ -13,7 +14,7 @@
 #define ICM42688_REG_FIFO_COUNTH   0x2E 
 #define ICM42688_REG_FIFO_COUNTL   0x2F 
 #define ICM42688_REG_FIFO_DATA     0x30 
-#define ICM42688_REG_SIGNAL_PATH_RESET 0x4B 
+#define ICM42688_REG_SIGNAL_PATH_RESET 0x4B // [VOLTINO FIX] Added for FIFO flushing
 #define ICM42688_REG_TMST_CONFIG   0x54
 #define ICM42688_REG_APEX_CONFIG0  0x56
 #define ICM42688_REG_SMD_CONFIG    0x57
@@ -31,46 +32,83 @@
 #define ICM_ADDR_SECONDARY 0x69
 #define WHO_AM_I_EXPECTED 0x47
 
-enum ICM_BUS { BUS_I2C, BUS_SPI };
-enum ICM_ACCEL_FS { AFS_16G = 0, AFS_8G = 1, AFS_4G = 2, AFS_2G = 3 };
-enum ICM_GYRO_FS { GFS_2000DPS = 0, GFS_1000DPS = 1, GFS_500DPS = 2, GFS_250DPS = 3, GFS_125DPS = 4 };
+enum ICM_BUS {
+  BUS_I2C,
+  BUS_SPI
+};
+
+enum ICM_ACCEL_FS {
+  AFS_16G = 0,
+  AFS_8G  = 1,
+  AFS_4G  = 2,
+  AFS_2G  = 3
+};
+
+enum ICM_GYRO_FS {
+  GFS_2000DPS = 0,
+  GFS_1000DPS = 1,
+  GFS_500DPS  = 2,
+  GFS_250DPS  = 3,
+  GFS_125DPS  = 4
+};
+
 enum ICM_ODR {
-  ODR_32KHZ = 1, ODR_16KHZ = 2, ODR_8KHZ = 3, ODR_4KHZ = 4,
-  ODR_2KHZ = 5, ODR_1KHZ = 6, ODR_200HZ = 7, ODR_100HZ = 8,
-  ODR_50HZ = 9, ODR_25HZ = 10, ODR_12_5HZ = 11, ODR_500HZ = 15
+  ODR_32KHZ  = 1,
+  ODR_16KHZ  = 2,
+  ODR_8KHZ   = 3,
+  ODR_4KHZ   = 4,
+  ODR_2KHZ   = 5,
+  ODR_1KHZ   = 6,
+  ODR_200HZ  = 7,
+  ODR_100HZ  = 8,
+  ODR_50HZ   = 9,
+  ODR_25HZ   = 10,
+  ODR_12_5HZ = 11,
+  ODR_500HZ  = 15
 };
 
 enum ICM_FIFO_MODE {
-  FIFO_NONE = 0,        
-  FIFO_16BIT = 1,       
-  FIFO_20BIT_HIRES = 2  
+  FIFO_NONE = 0,        // Standard register read (no FIFO)
+  FIFO_16BIT = 1,       // 16-bit FIFO (Packet format 3)
+  FIFO_20BIT_HIRES = 2  // 20-bit High-Res FIFO (Packet format 4)
 };
 
 class ICM42688P {
 public:
   ICM42688P();
   
+  // --- Initialization ---
   bool beginI2C(uint32_t freq = 0, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sdaPin = -1, int8_t sclPin = -1);
   bool beginSPI(int8_t csPin, uint32_t freq = 0, int8_t sckPin = -1, int8_t misoPin = -1, int8_t mosiPin = -1);
   bool begin(ICM_BUS busType, int8_t csPin = -1, uint32_t freq = 0, uint8_t i2cAddr = ICM_ADDR_PRIMARY, int8_t sckSclPin = -1, int8_t misoSdaPin = -1, int8_t mosiPin = -1);
   
   void setDebug(bool enable);
+
+  // --- Configuration ---
   void setODR(ICM_ODR odr);
   void setAccelFS(ICM_ACCEL_FS fs);
   void setGyroFS(ICM_GYRO_FS fs);
   void setFIFOMode(ICM_FIFO_MODE mode);
   
   int getODRHz(); 
-  ICM_FIFO_MODE getFIFOMode() { return _fifoMode; } 
   
+  // [VOLTINO FIX] Helper method to dynamically adapt fusion integration based on buffer state
+  ICM_FIFO_MODE getFIFOMode() { return _fifoMode; } 
+
+  // [VOLTINO FIX] Nová zachraňovací funkce přidána do hlavičky!
+  void flushFIFO();
+  
+  // --- Data reading ---
   bool readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   float readTemperature();
 
+  // Wrappers and specific methods for direct calls
   bool readSensorData(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   bool readHardwareFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   bool readHardwareFIFOHires(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
   bool readFIFO(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
 
+  // --- Calibration ---
   void resetHardwareOffsets();
   void autoCalibrateGyro(uint16_t samples = 750);
   void autoCalibrateAccel(); 
@@ -83,6 +121,7 @@ public:
   void getAccelSoftwareOffset(float &ox, float &oy, float &oz);
   void getAccelSoftwareScale(float &sx, float &sy, float &sz);
 
+  // Short names for backward compatibility
   void setGyroOffset(float ox, float oy, float oz);
   void setAccelOffset(float ox, float oy, float oz);
   void setAccelScale(float sx, float sy, float sz);

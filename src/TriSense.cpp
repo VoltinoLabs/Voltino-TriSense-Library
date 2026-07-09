@@ -156,8 +156,6 @@ void TriSenseFusion::initOrientation(int samples) {
 
   int nominalHz = _imu->getODRHz();
   _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
-  
-  _lastOdrCheckTime = micros();
   _lastIntegrationTime = micros(); 
   _sampleCount = 0;
 }
@@ -225,6 +223,7 @@ void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, F
   FUSION_MATH_TYPE qDot2 = 0.5 * (q[0] * gx + q[2] * gz - q[3] * gy);
   FUSION_MATH_TYPE qDot3 = 0.5 * (q[0] * gy - q[1] * gz + q[3] * gx); 
   FUSION_MATH_TYPE qDot4 = 0.5 * (q[0] * gz + q[1] * gy - q[2] * gx);
+  
   q[0] += qDot1 * dt; q[1] += qDot2 * dt; q[2] += qDot3 * dt; q[3] += qDot4 * dt;
   FUSION_MATH_TYPE recipNorm = 1.0 / sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]); 
   q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
@@ -238,7 +237,6 @@ bool SimpleTriFusion::update() {
   
   if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
-      _sampleCount++;
       
       lastAx = ax_raw - accelOffset[0]; 
       lastAy = ay_raw - accelOffset[1]; 
@@ -248,16 +246,18 @@ bool SimpleTriFusion::update() {
       lastGz = gz_raw - gyroOffset[2];
       
       FUSION_MATH_TYPE dt;
-      unsigned long nowMicros = micros();
 
+      // [VOLTINO FIX] Odstraněna vadná adaptace _realDt. FIFO běží natvrdo časem senzoru.
       if (_imu->getFIFOMode() == FIFO_NONE) {
+          unsigned long nowMicros = micros();
           if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
           dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
           _lastIntegrationTime = nowMicros;
           if (dt <= 0.0) dt = 0.00001;
           if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
       } else {
-          dt = _realDt;
+          int hz = _imu->getODRHz();
+          dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
       }
 
       gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
@@ -265,24 +265,7 @@ bool SimpleTriFusion::update() {
                       lastGz * (FUSION_MATH_TYPE)PI/180.0, dt);
   }
   
-  if (!dataProcessed) return false;
-  
-  unsigned long now = micros(); 
-  
-  if (now - _lastOdrCheckTime >= 1000000UL) { 
-      if (_lastOdrCheckTime != 0 && _sampleCount > 0) {
-          FUSION_MATH_TYPE measuredDt = (FUSION_MATH_TYPE)(now - _lastOdrCheckTime) / 1000000.0 / (FUSION_MATH_TYPE)_sampleCount;
-          int nominalHz = _imu->getODRHz();
-          FUSION_MATH_TYPE nominalDt = 1.0 / (FUSION_MATH_TYPE)(nominalHz > 0 ? nominalHz : 1000);
-          
-          if (measuredDt > nominalDt * 0.4 && measuredDt < nominalDt * 1.6) {
-              _realDt = _realDt * 0.7 + measuredDt * 0.3; 
-          }
-      }
-      _lastOdrCheckTime = now;
-      _sampleCount = 0;
-  }
-  return true;
+  return dataProcessed;
 }
 
 AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
@@ -345,7 +328,6 @@ bool AdvancedTriFusion::update() {
   
   if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
-      _sampleCount++;
       
       lastAx = ax_raw - accelOffset[0]; 
       lastAy = ay_raw - accelOffset[1]; 
@@ -355,58 +337,44 @@ bool AdvancedTriFusion::update() {
       lastGz = gz_raw - gyroOffset[2];
       
       FUSION_MATH_TYPE dt;
-      unsigned long nowMicros = micros();
 
+      // [VOLTINO FIX] Spolehlivý časový krok přímo podle frekvence
       if (_imu->getFIFOMode() == FIFO_NONE) {
+          unsigned long nowMicros = micros();
           if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
           dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
           _lastIntegrationTime = nowMicros;
           if (dt <= 0.0) dt = 0.00001;
           if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
       } else {
-          dt = _realDt;
+          int hz = _imu->getODRHz();
+          dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
       }
 
+      // [VOLTINO FIX] Oprava míchání jednotek v Gyro Bias (radiány vs stupně)
       gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGy * (FUSION_MATH_TYPE)PI/180.0, 
-                      (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, dt);
-  }
-  
-  if (!dataProcessed) return false;
-  
-  unsigned long now = micros(); 
-  
-  if (now - _lastOdrCheckTime >= 1000000UL) { 
-      if (_lastOdrCheckTime != 0 && _sampleCount > 0) {
-          FUSION_MATH_TYPE measuredDt = (FUSION_MATH_TYPE)(now - _lastOdrCheckTime) / 1000000.0 / (FUSION_MATH_TYPE)_sampleCount;
-          int nominalHz = _imu->getODRHz();
-          FUSION_MATH_TYPE nominalDt = 1.0 / (FUSION_MATH_TYPE)(nominalHz > 0 ? nominalHz : 1000);
-          if (measuredDt > nominalDt * 0.4 && measuredDt < nominalDt * 1.6) {
-              _realDt = _realDt * 0.7 + measuredDt * 0.3;
-          }
+                      (lastGz * (FUSION_MATH_TYPE)PI/180.0) - gyroBiasZ, 
+                      dt);
+
+      // --- Zpracování korekce musí běžet hned tady přímo na konkrétní přečtený paket! ---
+      unsigned long now = micros(); 
+      
+      if (now - lastMagCheckTime >= magCheckIntervalUs) {
+         lastMagCheckTime = now;
+         if (_mag->readData()) {
+            FUSION_MATH_TYPE mx_raw = _mag->x - magHardIron[0]; 
+            FUSION_MATH_TYPE my_raw = _mag->y - magHardIron[1]; 
+            FUSION_MATH_TYPE mz_raw = _mag->z - magHardIron[2];
+            lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
+            lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
+            lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+         }
       }
-      _lastOdrCheckTime = now;
-      _sampleCount = 0;
+      
+      // [VOLTINO FIX] Poskytujeme komplementárnímu filtru ten samý 'dt', kterým proběhla integrace
+      complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, dt);
   }
   
-  if (now - lastMagCheckTime >= magCheckIntervalUs) {
-     lastMagCheckTime = now;
-     if (_mag->readData()) {
-        FUSION_MATH_TYPE mx_raw = _mag->x - magHardIron[0]; 
-        FUSION_MATH_TYPE my_raw = _mag->y - magHardIron[1]; 
-        FUSION_MATH_TYPE mz_raw = _mag->z - magHardIron[2];
-        lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-        lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-        lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
-     }
-  }
-
-  unsigned long correctionDeltaUs = now - lastSuccessfulCorrectionTime;
-  FUSION_MATH_TYPE correction_dt = (FUSION_MATH_TYPE)correctionDeltaUs / 1000000.0;
-  if (correction_dt > 0.1 || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01;
-  
-  complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
-  lastSuccessfulCorrectionTime = now;
-
-  return true;
+  return dataProcessed;
 }
