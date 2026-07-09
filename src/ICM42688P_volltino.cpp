@@ -160,6 +160,11 @@ int ICM42688P::getODRHz() {
   return _getHzFromODR(_odr);
 }
 
+// ADDED THIS FUNCTION:
+ICM_FIFO_MODE ICM42688P::getFIFOMode() {
+  return _fifoMode;
+}
+
 int ICM42688P::_getHzFromODR(ICM_ODR odr) {
   switch(odr) {
     case ODR_32KHZ: return 32000;
@@ -261,20 +266,32 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
 
   _fifoMode = mode;
 
+  // [VOLTINO FIX] First reset FIFO to bypass with empty configuration
   writeRegister(ICM42688_REG_FIFO_CONFIG, 0x00);
   writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x00);
 
+  // [VOLTINO FIX] Flush FIFO before changing mode (prevents leftover data)
+  writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); // FIFO_FLUSH
+
   if (mode == FIFO_16BIT) {
-    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
+    // Stream-to-FIFO + ACCEL_EN + GYRO_EN
+    // Without ACCEL_EN and GYRO_EN FIFO receives no data! (Datasheet §6.4)
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x03);  // FIFO_ACCEL_EN | FIFO_GYRO_EN
+    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    // Stream-to-FIFO mode
   } 
   else if (mode == FIFO_20BIT_HIRES) {
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x10); 
-    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
+    // HIRES_EN + ACCEL_EN + GYRO_EN (all 3 bits required!)
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x13);  // FIFO_HIRES_EN | FIFO_ACCEL_EN | FIFO_GYRO_EN
+    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    // Stream-to-FIFO mode
   }
   
   enforceBandwidthLimit(); 
+}
+
+void ICM42688P::flushFIFO() {
+  writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02);
 }
 
 void ICM42688P::setAccelOffset(float x, float y, float z) { accOffset[0] = x; accOffset[1] = y; accOffset[2] = z; }
@@ -377,7 +394,7 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   return true;
 }
 
-// [VOLTINO FIX] 100% OPRAVENÁ LOGIKA PARSOVÁNÍ 20-BIT DAT PODLE TDK DATASHEETU!
+// [VOLTINO FIX] 100% FIXED PARSING LOGIC FOR 20-BIT DATA ACCORDING TO TDK DATASHEET!
 bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
   uint8_t countBuf[2];
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
@@ -390,9 +407,9 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
 
   if ((buffer[0] & 0x80) != 0) return false;
 
-  // Skládání z MSB, LSB a Extension Byte (20 bitů celkem)
+  // Composing from MSB, LSB and Extension Byte (20 bits total)
   int32_t rawAx = (int32_t)((buffer[1] << 12) | (buffer[2] << 4) | (buffer[17] >> 4));
-  if (rawAx & 0x80000) rawAx |= 0xFFF00000; // Sign-extend pro bit 19
+  if (rawAx & 0x80000) rawAx |= 0xFFF00000; // Sign-extend for bit 19
 
   int32_t rawAy = (int32_t)((buffer[3] << 12) | (buffer[4] << 4) | (buffer[17] & 0x0F));
   if (rawAy & 0x80000) rawAy |= 0xFFF00000;
@@ -409,7 +426,7 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
   int32_t rawGz = (int32_t)((buffer[11] << 12) | (buffer[12] << 4) | (buffer[19] & 0x0F));
   if (rawGz & 0x80000) rawGz |= 0xFFF00000;
 
-  // Senzor v 20-bit mode automaticky vynucuje 16G a 2000DPS (2^19 = 524288)
+  // Sensor in 20-bit mode automatically forces 16G and 2000DPS (2^19 = 524288)
   float scaleAccel20 = 16.0f / 524288.0f;
   float scaleGyro20  = 2000.0f / 524288.0f;
 

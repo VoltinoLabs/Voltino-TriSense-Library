@@ -7,10 +7,10 @@
 #include "BMP580.h"
 
 // ---------------------------------------------------------
-// ŘEŠENÍ KONFLIKTU ENUMERÁTORŮ (NAMESPACE POLLUTION)
+// RESOLVING ENUMERATOR CONFLICTS (NAMESPACE POLLUTION)
 // ---------------------------------------------------------
-// Bez zásahu do původních knihoven využijeme preprocesor k dynamickému
-// přejmenování kolidujících ODR hodnot pro AK09918C. Tím oddělíme IMU a MAG.
+// Without modifying the original libraries, we use the preprocessor to dynamically
+// rename conflicting ODR values for AK09918C. This separates IMU and MAG.
 #define ODR_10HZ  AK_ODR_10HZ
 #define ODR_20HZ  AK_ODR_20HZ
 #define ODR_50HZ  AK_ODR_50HZ
@@ -18,7 +18,7 @@
 
 #include "AK09918C.h"
 
-// Zrušíme makra, aby si ICM42688P mohlo definovat své vlastní ODR enums
+// Undefine macros so ICM42688P can define its own ODR enums
 #undef ODR_10HZ
 #undef ODR_20HZ
 #undef ODR_50HZ
@@ -62,10 +62,10 @@
   #define DEFAULT_CALIBRATION_SAMPLES 500
 #endif
 
-// --- NOVÉ JEDNOTKY PRO ZRYCHLENÍ ---
+// --- NEW ACCELERATION UNITS ---
 enum AccelUnit {
-  ACCEL_UNIT_G,      // Násobky gravitačního zrychlení (G)
-  ACCEL_UNIT_MS2     // Metry za sekundu na druhou (m/s^2)
+  ACCEL_UNIT_G,      // Multiples of gravitational acceleration (G)
+  ACCEL_UNIT_MS2     // Meters per second squared (m/s^2)
 };
 
 struct TriSenseDataSnapshot {
@@ -90,7 +90,7 @@ public:
   
   bool beginAll(TriSenseMode mode, uint8_t spiCsPin = 17, uint32_t spiFreq = 4000000);
   
-  // OPRAVENO: BMP580_PRIMARY_I2C_ADDR
+  // FIXED: BMP580_PRIMARY_I2C_ADDR
   bool beginBMP(uint8_t addr = BMP580_PRIMARY_I2C_ADDR);
   bool beginMAG();
   bool beginIMU(ICM_BUS busType = BUS_I2C, uint8_t csPin = 17, uint32_t freq = 4000000);
@@ -123,8 +123,8 @@ public:
   float magHardIron[3] = {0.0f, 0.0f, 0.0f};      
   float magSoftIron[3][3] = {{1,0,0},{0,1,0},{0,0,1}}; 
   
-  // --- LOKÁLNÍ GRAVITACE ---
-  float _localGravity = 9.80665f; // Standardní gravitace (můžeme přepsat)
+  // --- LOCAL GRAVITY ---
+  float _localGravity = 9.80665f; // Standard gravity (can be overwritten)
 
   float accRef = 1.0f;          
   float accSigma = 0.05f;       
@@ -159,8 +159,8 @@ public:
   
   void getOrientationDegrees(float& roll, float& pitch, float& yaw);
   
-  // --- NOVÉ AKCELERAČNÍ API ---
-  void setLocalGravity(float g); // Nastavení přesného G pro danou lokaci
+  // --- NEW ACCELERATION API ---
+  void setLocalGravity(float g); // Set exact G for a given location
   void getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
   void getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit = ACCEL_UNIT_G);
   

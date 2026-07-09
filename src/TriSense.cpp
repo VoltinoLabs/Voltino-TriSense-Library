@@ -230,11 +230,20 @@ void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, F
 
 SimpleTriFusion::SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
+// ============================================================
+// [VOLTINO FIX] SimpleTriFusion::update()
+// Completely rewritten: FIFO mode now empties ALL
+// available packets, each with dt = 1/ODR, to prevent
+// sample loss and rotation underestimation.
+// ============================================================
 bool SimpleTriFusion::update() {
-  float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw; 
   bool dataProcessed = false;
   
-  if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
+  if (_imu->getFIFOMode() == FIFO_NONE) {
+    // --- Direct register read mode (polling) ---
+    // dt is measured from the actual time between calls
+    float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+    if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
       
       lastAx = ax_raw - accelOffset[0]; 
@@ -244,23 +253,41 @@ bool SimpleTriFusion::update() {
       lastGy = gy_raw - gyroOffset[1];  
       lastGz = gz_raw - gyroOffset[2];
       
-      FUSION_MATH_TYPE dt;
-
-      if (_imu->getFIFOMode() == FIFO_NONE) {
-          unsigned long nowMicros = micros();
-          if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
-          dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
-          _lastIntegrationTime = nowMicros;
-          if (dt <= 0.0) dt = 0.00001;
-          if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
-      } else {
-          int hz = _imu->getODRHz();
-          dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
-      }
-
+      unsigned long nowMicros = micros();
+      if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+      FUSION_MATH_TYPE dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+      _lastIntegrationTime = nowMicros;
+      if (dt <= 0.0) dt = 0.00001;
+      if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
+      
       gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGy * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGz * (FUSION_MATH_TYPE)PI/180.0, dt);
+    }
+  } else {
+    // --- FIFO mode: empty ALL available packets ---
+    // Each packet represents exactly 1/ODR seconds of gyro data
+    int hz = _imu->getODRHz();
+    FUSION_MATH_TYPE dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
+    
+    while (true) {
+      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+      if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
+        break; // FIFO empty - all data processed
+      }
+      dataProcessed = true;
+      
+      lastAx = ax_raw - accelOffset[0]; 
+      lastAy = ay_raw - accelOffset[1]; 
+      lastAz = az_raw - accelOffset[2]; 
+      lastGx = gx_raw - gyroOffset[0];  
+      lastGy = gy_raw - gyroOffset[1];  
+      lastGz = gz_raw - gyroOffset[2];
+      
+      gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
+                      lastGy * (FUSION_MATH_TYPE)PI/180.0, 
+                      lastGz * (FUSION_MATH_TYPE)PI/180.0, dt);
+    }
   }
   
   return dataProcessed;
@@ -320,11 +347,19 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
 }
 
+// ============================================================
+// [VOLTINO FIX] AdvancedTriFusion::update()
+// Same principle: empty all FIFO packets, integrate
+// each separately, and only then (once) perform magnetic
+// correction.
+// ============================================================
 bool AdvancedTriFusion::update() {
-  float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw; 
   bool dataProcessed = false;
   
-  if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
+  if (_imu->getFIFOMode() == FIFO_NONE) {
+    // --- Direct register read mode ---
+    float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+    if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
       
       lastAx = ax_raw - accelOffset[0]; 
@@ -334,47 +369,85 @@ bool AdvancedTriFusion::update() {
       lastGy = gy_raw - gyroOffset[1]; 
       lastGz = gz_raw - gyroOffset[2];
       
-      FUSION_MATH_TYPE dt;
-
-      if (_imu->getFIFOMode() == FIFO_NONE) {
-          unsigned long nowMicros = micros();
-          if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
-          dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
-          _lastIntegrationTime = nowMicros;
-          if (dt <= 0.0) dt = 0.00001;
-          if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
-      } else {
-          int hz = _imu->getODRHz();
-          dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
-      }
-
+      unsigned long nowMicros = micros();
+      if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+      FUSION_MATH_TYPE dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+      _lastIntegrationTime = nowMicros;
+      if (dt <= 0.0) dt = 0.00001;
+      if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
+      
       gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGy * (FUSION_MATH_TYPE)PI/180.0, 
                       (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, 
                       dt);
-
-      // --- [VOLTINO FIX] Návrat k původní spolehlivé struktuře z OLD verze! ---
-      // Korekce nesmí běžet 1000x za sekundu. Spouštíme ji pouze tehdy, když magnetometr dává nová data.
-      unsigned long now = micros(); 
       
+      // Magnetic correction (only for polling mode - performed on every sample)
+      unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
-         lastMagCheckTime = now;
-         if (_mag->readData()) {
-            FUSION_MATH_TYPE mx_raw = _mag->x - magHardIron[0]; 
-            FUSION_MATH_TYPE my_raw = _mag->y - magHardIron[1]; 
-            FUSION_MATH_TYPE mz_raw = _mag->z - magHardIron[2];
-            lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
-            lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
-            lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
-
-            // Dynamický časový krok POUZE pro korekční filtr (např. cca 10 ms)
-            FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
-            if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
-
-            complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
-            lastSuccessfulCorrectionTime = now;
-         }
+        lastMagCheckTime = now;
+        if (_mag->readData()) {
+          FUSION_MATH_TYPE mx_raw = _mag->x - magHardIron[0]; 
+          FUSION_MATH_TYPE my_raw = _mag->y - magHardIron[1]; 
+          FUSION_MATH_TYPE mz_raw = _mag->z - magHardIron[2];
+          lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
+          lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
+          lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+          
+          FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
+          if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
+          
+          complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
+          lastSuccessfulCorrectionTime = now;
+        }
       }
+    }
+  } else {
+    // --- FIFO mode: empty ALL available packets ---
+    int hz = _imu->getODRHz();
+    FUSION_MATH_TYPE dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
+    
+    while (true) {
+      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+      if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
+        break; // FIFO empty
+      }
+      dataProcessed = true;
+      
+      lastAx = ax_raw - accelOffset[0]; 
+      lastAy = ay_raw - accelOffset[1]; 
+      lastAz = az_raw - accelOffset[2];
+      lastGx = gx_raw - gyroOffset[0]; 
+      lastGy = gy_raw - gyroOffset[1]; 
+      lastGz = gz_raw - gyroOffset[2];
+      
+      gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
+                      lastGy * (FUSION_MATH_TYPE)PI/180.0, 
+                      (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, 
+                      dt);
+    }
+    
+    // Magnetic correction - performed ONCE after emptying the entire FIFO,
+    // not for each individual packet (magnetometer is slow)
+    if (dataProcessed) {
+      unsigned long now = micros();
+      if (now - lastMagCheckTime >= magCheckIntervalUs) {
+        lastMagCheckTime = now;
+        if (_mag->readData()) {
+          FUSION_MATH_TYPE mx_raw = _mag->x - magHardIron[0]; 
+          FUSION_MATH_TYPE my_raw = _mag->y - magHardIron[1]; 
+          FUSION_MATH_TYPE mz_raw = _mag->z - magHardIron[2];
+          lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
+          lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
+          lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
+          
+          FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
+          if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
+          
+          complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
+          lastSuccessfulCorrectionTime = now;
+        }
+      }
+    }
   }
   
   return dataProcessed;
