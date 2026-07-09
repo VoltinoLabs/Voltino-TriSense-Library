@@ -106,6 +106,7 @@ void TriSenseFusion::initOrientation(int samples) {
   FUSION_MATH_TYPE axSum=0, aySum=0, azSum=0, mxSum=0, mySum=0, mzSum=0; 
   int count = 0;
   
+  // Zcela bezpečné softwarové vyprázdnění přeplněného zásobníku
   if (_imu->getFIFOMode() != FIFO_NONE) {
       float ax, ay, az, gx, gy, gz;
       while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
