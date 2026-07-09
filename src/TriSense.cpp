@@ -82,7 +82,6 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   double sumX=0, sumY=0, sumZ=0; 
   int count = 0;
   
-  // [VOLTINO FIX] Uvolnění zásobníku pro hladký průběh kalibrace
   if (_imu->getFIFOMode() != FIFO_NONE) {
       float ax, ay, az, gx, gy, gz;
       while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
@@ -107,7 +106,7 @@ void TriSenseFusion::initOrientation(int samples) {
   FUSION_MATH_TYPE axSum=0, aySum=0, azSum=0, mxSum=0, mySum=0, mzSum=0; 
   int count = 0;
   
-  // [VOLTINO FIX] Spláchnutí FIFO a zajištění, že nás pomalý Magnetometr neudusí
+  // Pročištění starého zásobníku před startem, aby se to nezaseklo hned na začátku
   if (_imu->getFIFOMode() != FIFO_NONE) {
       float ax, ay, az, gx, gy, gz;
       while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
@@ -117,7 +116,7 @@ void TriSenseFusion::initOrientation(int samples) {
      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
      
      bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
-     _mag->readData(); // Nezávisle žádáme o Mag (když data nejsou, drží stará, a to nám stačí)
+     _mag->readData(); 
 
      if(imuReady) {
          FUSION_MATH_TYPE ax = ax_raw - accelOffset[0]; 
@@ -135,9 +134,8 @@ void TriSenseFusion::initOrientation(int samples) {
          
          mxSum+=mx; mySum+=my; mzSum+=mz; 
          count++; 
-         // Vyndáno nesmyslné delay(2)! Chceme vysypat FIFO plnou rychlostí senzoru!
      } else {
-         delay(1);
+         delay(1); // Uvolnění procesoru (nikoliv tvrdý delay po dobu sběru jako předtím)
      }
   }
   

@@ -259,15 +259,16 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x00);
 
   if (mode == FIFO_16BIT) {
-    // [VOLTINO FIX] 0x03 enables Gyro (bit 1) and Accel (bit 0) into FIFO packets!
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x03); 
+    // [VOLTINO FIX] 0x0F natvrdo zapne Accel, Gyro, Temp i Time. 
+    // Zaručí, že paket bude mít vždy přesně 16 bajtů a nerozhodí se offset!
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x0F); 
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   } 
   else if (mode == FIFO_20BIT_HIRES) {
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
-    // [VOLTINO FIX] 0x13 enables High-Res (bit 4), Gyro (bit 1), Accel (bit 0)
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x13); 
+    // [VOLTINO FIX] 0x1F pro 20 bajtů HighRes
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x1F); 
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   }
   
@@ -347,8 +348,9 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
 
   if (fifoCount < 16) return false; 
 
-  // [VOLTINO FIX] Pravý Flush Bit v SIGNAL_PATH_RESET je 0x02!
-  if (fifoCount >= 1000) {
+  // [VOLTINO FIX] 2000 bajtů znamená téměř plný FIFO (max je 2048).
+  // Díky tomu knihovna už nemaže cenná data při každém zpoždění procesoru.
+  if (fifoCount >= 2000) {
       writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); 
       return false;
   }
@@ -356,7 +358,7 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   uint8_t buffer[16];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 16);
 
-  if ((buffer[0] & 0x80) != 0) { // Pokud vytáhneme prázdnou hlavičku, flush
+  if ((buffer[0] & 0x80) != 0) { // Prázdná hlavička = chyba zarovnání
       writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); 
       return false; 
   }
@@ -386,7 +388,7 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
 
   if (fifoCount < 20) return false; 
 
-  if (fifoCount >= 1000) {
+  if (fifoCount >= 2000) {
       writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); 
       return false;
   }
@@ -439,7 +441,7 @@ float ICM42688P::readTemperature() {
 }
 
 // ====================================================================
-// --- ZDE JSOU ZPĚT TVÉ DVĚ KOMPLETNÍ FUNKCE PRO KALIBRACI ---
+// --- NEZKRÁCENÉ KALIBRAČNÍ FUNKCE (PRO ÚPLNOST SOUBORU) ---
 // ====================================================================
 
 void ICM42688P::autoCalibrateGyro(uint16_t samples) {
