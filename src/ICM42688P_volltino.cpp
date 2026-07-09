@@ -91,9 +91,7 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
   delay(10); 
 
   uint8_t who = readRegister(ICM42688_REG_WHO_AM_I);
-  if (who != WHO_AM_I_EXPECTED) {
-    return false;
-  }
+  if (who != WHO_AM_I_EXPECTED) return false;
 
   writeRegister(ICM42688_REG_PWR_MGMT0, 0x0F); 
   delay(5);
@@ -205,9 +203,7 @@ void ICM42688P::enforceBandwidthLimit() {
     }
   }
 
-  if (safeODR != _odr) {
-    _odr = safeODR; 
-  }
+  if (safeODR != _odr) _odr = safeODR; 
 
   uint8_t odd = (uint8_t)_odr;
   uint8_t gConf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0xF0;
@@ -259,22 +255,23 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x00);
 
   if (mode == FIFO_16BIT) {
-    // [VOLTINO FIX]: Aktivace Timestamp Engine (Bit 4 v TMST_CONFIG). 
-    // Zabraňuje pádu do 14-byte Packet Format 1 a ničení FIFO zarovnání.
+    // [VOLTINO FIX]: TMST_EN je bit 0 (0x01)! TMST_TO_REGS_EN je bit 4 (0x10).
+    // Musíme zapnout obojí (0x11), aby měl paket fixně 16 bajtů a knihovna nesmazala data!
     uint8_t tmst = readRegister(ICM42688_REG_TMST_CONFIG);
-    writeRegister(ICM42688_REG_TMST_CONFIG, tmst | 0x10);
+    writeRegister(ICM42688_REG_TMST_CONFIG, tmst | 0x11);
 
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x0F); 
-    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
+    // 0x07 = TEMP_EN (Bit 2), GYRO_EN (Bit 1), ACCEL_EN (Bit 0) pro Packet Format 3
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x07); 
+    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40); // Zapne FIFO do Stream Mode
   } 
   else if (mode == FIFO_20BIT_HIRES) {
-    // [VOLTINO FIX]: To samé pro 20-bit HiRes režim.
     uint8_t tmst = readRegister(ICM42688_REG_TMST_CONFIG);
-    writeRegister(ICM42688_REG_TMST_CONFIG, tmst | 0x10);
+    writeRegister(ICM42688_REG_TMST_CONFIG, tmst | 0x11);
 
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x1F); 
+    // 0x17 = HIRES_EN (Bit 4), TEMP_EN (Bit 2), GYRO_EN (Bit 1), ACCEL_EN (Bit 0) pro Packet Format 4
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x17); 
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   }
   
@@ -354,14 +351,11 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
 
   if (fifoCount < 16) return false; 
 
-  if (fifoCount >= 2000) {
-      writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); 
-      return false;
-  }
-
   uint8_t buffer[16];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 16);
 
+  // [VOLTINO FIX]: Nyní flushujeme POUZE, pokud je hardware hlavička skutečně posunutá
+  // a ne jen kvůli tomu, že procesor chvíli logoval na SD kartu.
   if ((buffer[0] & 0x80) != 0) { 
       writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); 
       return false; 
@@ -391,11 +385,6 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
   uint16_t fifoCount = (countBuf[0] << 8) | countBuf[1];
 
   if (fifoCount < 20) return false; 
-
-  if (fifoCount >= 2000) {
-      writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); 
-      return false;
-  }
 
   uint8_t buffer[20];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 20);
