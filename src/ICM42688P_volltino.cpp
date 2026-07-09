@@ -64,7 +64,7 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
   } else {
     #if defined(ESP32) 
       if (sckSclPin != -1 && misoSdaPin != -1) {
-        Wire.setPins(misoSdaPin, sckSclPin); 
+        Wire.setPins(misoSdaPin, sckSclPin); // SDA, SCL
       }
     #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
       if (sckSclPin != -1 && misoSdaPin != -1) {
@@ -78,22 +78,24 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
 
     Wire.beginTransmission(_i2cAddr);
     if (Wire.endTransmission() != 0) {
-      uint8_t altAddr = (_i2cAddr == ICM_ADDR_PRIMARY) ? ICM_ADDR_SECONDARY : ICM_ADDR_PRIMARY;
-      Wire.beginTransmission(altAddr);
-      if (Wire.endTransmission() == 0) {
-        _i2cAddr = altAddr;
-      }
+      _i2cAddr = (_i2cAddr == ICM_ADDR_PRIMARY) ? ICM_ADDR_SECONDARY : ICM_ADDR_PRIMARY;
     }
   }
   
   delay(10);
-  writeRegister(ICM42688_REG_DEVICE_CONFIG, 0x01); 
+  writeRegister(ICM42688_REG_DEVICE_CONFIG, 0x01); // Soft Reset
   delay(10); 
 
   uint8_t who = readRegister(ICM42688_REG_WHO_AM_I);
-  if (who != WHO_AM_I_EXPECTED) return false;
+  if (who != WHO_AM_I_EXPECTED) {
+    if (_debug) {
+      Serial.print(F("ICM WHO_AM_I Error. Expected 0x47, got 0x"));
+      Serial.println(who, HEX);
+    }
+    return false;
+  }
 
-  writeRegister(ICM42688_REG_PWR_MGMT0, 0x0F); 
+  writeRegister(ICM42688_REG_PWR_MGMT0, 0x0F); // Sensors ON
   delay(5);
 
   setAccelFS(AFS_16G);
@@ -156,25 +158,35 @@ uint8_t ICM42688P::readRegister(uint8_t reg) {
   return data;
 }
 
-int ICM42688P::getODRHz() { return _getHzFromODR(_odr); }
+int ICM42688P::getODRHz() {
+  return _getHzFromODR(_odr);
+}
 
 int ICM42688P::_getHzFromODR(ICM_ODR odr) {
   switch(odr) {
-    case ODR_32KHZ: return 32000; case ODR_16KHZ: return 16000;
-    case ODR_8KHZ:  return 8000;  case ODR_4KHZ:  return 4000;
-    case ODR_2KHZ:  return 2000;  case ODR_1KHZ:  return 1000;
-    case ODR_500HZ: return 500;   case ODR_200HZ: return 200;
-    case ODR_100HZ: return 100;   case ODR_50HZ:  return 50;
-    case ODR_25HZ:  return 25;    case ODR_12_5HZ:return 12; 
+    case ODR_32KHZ: return 32000;
+    case ODR_16KHZ: return 16000;
+    case ODR_8KHZ:  return 8000;
+    case ODR_4KHZ:  return 4000;
+    case ODR_2KHZ:  return 2000;
+    case ODR_1KHZ:  return 1000;
+    case ODR_500HZ: return 500;
+    case ODR_200HZ: return 200;
+    case ODR_100HZ: return 100;
+    case ODR_50HZ:  return 50;
+    case ODR_25HZ:  return 25;
+    case ODR_12_5HZ:return 12; 
     default: return 0;
   }
 }
 
+// [VOLTINO FIX] Zcela opravená fuknce pro omezování šířky pásma a řízení reálné ODR frekvence
 void ICM42688P::enforceBandwidthLimit() {
   uint32_t bytesPerRead = 0;
+  
   if (_fifoMode == FIFO_NONE) bytesPerRead = 13; 
-  else if (_fifoMode == FIFO_16BIT) bytesPerRead = 20; 
-  else if (_fifoMode == FIFO_20BIT_HIRES) bytesPerRead = 24; 
+  else if (_fifoMode == FIFO_16BIT) bytesPerRead = 16; 
+  else if (_fifoMode == FIFO_20BIT_HIRES) bytesPerRead = 20; 
 
   uint32_t bitsPerByte = (_bus == BUS_I2C) ? 10 : 8; 
   uint32_t bitsPerRead = bytesPerRead * bitsPerByte;
@@ -183,9 +195,13 @@ void ICM42688P::enforceBandwidthLimit() {
   ICM_ODR odrList[] = {ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ, ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ};
   ICM_ODR safeODR = _odr;
   
+  int requestedHz = _getHzFromODR(_odr); // Frekvence, kterou nastavil uživatel
+
   for (int i = 0; i < 12; i++) {
     int targetHz = _getHzFromODR(odrList[i]);
-    if (_getHzFromODR(safeODR) > targetHz) continue; 
+    
+    // Zásadní oprava: Zkoušíme jen ty frekvence, které jsou menší nebo rovny té požadované
+    if (targetHz > requestedHz) continue; 
     
     uint32_t requiredBps = bitsPerRead * targetHz;
     if (requiredBps <= maxAllowedBps) {
@@ -194,7 +210,14 @@ void ICM42688P::enforceBandwidthLimit() {
     }
   }
 
-  if (safeODR != _odr) _odr = safeODR; 
+  if (safeODR != _odr) {
+    if (_debug) {
+      Serial.print(F("Voltino TriSense WARNING: Bus bandwidth capacity exceeded. Downgrading ODR to "));
+      Serial.print(_getHzFromODR(safeODR));
+      Serial.println(F(" Hz."));
+    }
+    _odr = safeODR; 
+  }
 
   uint8_t odd = (uint8_t)_odr;
   uint8_t gConf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0xF0;
@@ -203,10 +226,14 @@ void ICM42688P::enforceBandwidthLimit() {
   writeRegister(ICM42688_REG_ACCEL_CONFIG0, aConf | odd);
 }
 
-void ICM42688P::setODR(ICM_ODR odr) { _odr = odr; enforceBandwidthLimit(); }
+void ICM42688P::setODR(ICM_ODR odr) {
+  _odr = odr;
+  enforceBandwidthLimit();
+}
 
 void ICM42688P::setAccelFS(ICM_ACCEL_FS fs) {
   if (_fifoMode == FIFO_20BIT_HIRES) fs = AFS_16G;
+
   uint8_t conf = readRegister(ICM42688_REG_ACCEL_CONFIG0) & 0x1F;
   writeRegister(ICM42688_REG_ACCEL_CONFIG0, (conf & 0x1F) | (fs << 5));
   switch(fs) {
@@ -219,6 +246,7 @@ void ICM42688P::setAccelFS(ICM_ACCEL_FS fs) {
 
 void ICM42688P::setGyroFS(ICM_GYRO_FS fs) {
   if (_fifoMode == FIFO_20BIT_HIRES) fs = GFS_2000DPS;
+
   uint8_t conf = readRegister(ICM42688_REG_GYRO_CONFIG0) & 0x1F;
   writeRegister(ICM42688_REG_GYRO_CONFIG0, (conf & 0x1F) | (fs << 5));
   switch(fs) {
@@ -232,38 +260,27 @@ void ICM42688P::setGyroFS(ICM_GYRO_FS fs) {
 
 void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   #if defined(__AVR__) || defined(ARDUINO_ARCH_AVR)
-    if (mode == FIFO_20BIT_HIRES) mode = FIFO_16BIT;
+    if (mode == FIFO_20BIT_HIRES) {
+      mode = FIFO_16BIT;
+    }
   #endif
 
   _fifoMode = mode;
+
   writeRegister(ICM42688_REG_FIFO_CONFIG, 0x00);
   writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x00);
 
   if (mode == FIFO_16BIT) {
-    // [VOLTINO FIX]: TMST_EN je Bit 0 (0x01)! TMST musí být zapnuto pro 16-Byte paket.
-    uint8_t tmst = readRegister(ICM42688_REG_TMST_CONFIG);
-    writeRegister(ICM42688_REG_TMST_CONFIG, tmst | 0x01);
-
-    // 0x0F = TMST_FSYNC_EN (Bit 3), TEMP_EN (Bit 2), GYRO_EN (Bit 1), ACCEL_EN (Bit 0)
-    // Tímto VYNUTÍME přesně 16 bajtů na paket (Packet Format 3)
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x0F); 
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   } 
   else if (mode == FIFO_20BIT_HIRES) {
-    uint8_t tmst = readRegister(ICM42688_REG_TMST_CONFIG);
-    writeRegister(ICM42688_REG_TMST_CONFIG, tmst | 0x01);
-
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
-    // 0x1F = HIRES_EN (Bit 4), TMST_FSYNC_EN (Bit 3), TEMP_EN (Bit 2), GYRO_EN (Bit 1), ACCEL_EN (Bit 0)
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x1F); 
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x10); 
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   }
+  
   enforceBandwidthLimit(); 
-}
-
-void ICM42688P::flushFIFO() {
-  writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02);
 }
 
 void ICM42688P::setAccelOffset(float x, float y, float z) { accOffset[0] = x; accOffset[1] = y; accOffset[2] = z; }
@@ -297,10 +314,14 @@ void ICM42688P::setBank(uint8_t bank) { writeRegister(ICM42688_REG_BANK_SEL, ban
 
 bool ICM42688P::readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
   switch (_fifoMode) {
-    case FIFO_NONE: return readSensorData(ax, ay, az, gx, gy, gz);
-    case FIFO_16BIT: return readHardwareFIFO(ax, ay, az, gx, gy, gz);
-    case FIFO_20BIT_HIRES: return readHardwareFIFOHires(ax, ay, az, gx, gy, gz);
-    default: return false;
+    case FIFO_NONE:
+      return readSensorData(ax, ay, az, gx, gy, gz);
+    case FIFO_16BIT:
+      return readHardwareFIFO(ax, ay, az, gx, gy, gz);
+    case FIFO_20BIT_HIRES:
+      return readHardwareFIFOHires(ax, ay, az, gx, gy, gz);
+    default:
+      return false;
   }
 }
 
@@ -338,23 +359,11 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   uint16_t fifoCount = (countBuf[0] << 8) | countBuf[1];
 
   if (fifoCount < 16) return false; 
-  if (fifoCount >= 2000) { flushFIFO(); return false; }
 
   uint8_t buffer[16];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 16);
 
-  // [VOLTINO FIX]: Odstranění Infinite Loopu!
-  // Pokud je to zpráva (např. FIFO flush), má Bit 7 na 1. Jen ji ignorujeme a vracíme false.
-  if ((buffer[0] & 0x80) != 0) { 
-      return false; 
-  }
-
-  // Platná hlavička pro Format 3 (16-byte) musí začínat na 0x60 (bity 6 a 5 jsou 1).
-  // Pokud ne, jsme posunutí a musíme resetovat!
-  if ((buffer[0] & 0xF0) != 0x60) {
-      flushFIFO();
-      return false;
-  }
+  if ((buffer[0] & 0x80) != 0) return false; 
 
   int16_t rawAx = (int16_t)((buffer[1] << 8) | buffer[2]);
   int16_t rawAy = (int16_t)((buffer[3] << 8) | buffer[4]);
@@ -363,13 +372,10 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   int16_t rawGy = (int16_t)((buffer[9] << 8) | buffer[10]);
   int16_t rawGz = (int16_t)((buffer[11] << 8) | buffer[12]);
 
-  // [VOLTINO FIX]: Filtrace startup chybových hodnot (-32768), které jsi viděl v logu.
-  if (rawAx == -32768 && rawAy == -32768 && rawAz == -32768) return false;
-  if (rawGx == -32768 && rawGy == -32768 && rawGz == -32768) return false;
-
   ax = ((float)rawAx * _accelScaleFactor - accOffset[0]) * accScale[0];
   ay = ((float)rawAy * _accelScaleFactor - accOffset[1]) * accScale[1];
   az = ((float)rawAz * _accelScaleFactor - accOffset[2]) * accScale[2];
+  
   gx = (float)rawGx * _gyroScaleFactor - gyrOffset[0];
   gy = (float)rawGy * _gyroScaleFactor - gyrOffset[1];
   gz = (float)rawGz * _gyroScaleFactor - gyrOffset[2];
@@ -383,33 +389,19 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
   uint16_t fifoCount = (countBuf[0] << 8) | countBuf[1];
 
   if (fifoCount < 20) return false; 
-  if (fifoCount >= 2000) { flushFIFO(); return false; }
 
   uint8_t buffer[20];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 20);
 
   if ((buffer[0] & 0x80) != 0) return false;
+
+  int32_t rawAx = (int32_t)((buffer[1] << 24) | (buffer[2] << 16) | (buffer[3] << 8)) >> 12;
+  int32_t rawAy = (int32_t)((buffer[4] << 24) | (buffer[5] << 16) | (buffer[6] << 8)) >> 12;
+  int32_t rawAz = (int32_t)((buffer[7] << 24) | (buffer[8] << 16) | (buffer[9] << 8)) >> 12;
   
-  // Platná hlavička pro Format 4 (20-byte) musí začínat na 0x70.
-  if ((buffer[0] & 0xF0) != 0x70) {
-      flushFIFO();
-      return false;
-  }
-
-  int32_t rawAx = (int32_t)( ((uint32_t)buffer[1] << 12) | ((uint32_t)buffer[2] << 4) | (buffer[17] & 0x0F) );
-  rawAx = (rawAx << 12) >> 12;
-  int32_t rawAy = (int32_t)( ((uint32_t)buffer[3] << 12) | ((uint32_t)buffer[4] << 4) | (buffer[18] >> 4) );
-  rawAy = (rawAy << 12) >> 12;
-  int32_t rawAz = (int32_t)( ((uint32_t)buffer[5] << 12) | ((uint32_t)buffer[6] << 4) | (buffer[19] >> 4) );
-  rawAz = (rawAz << 12) >> 12;
-  int32_t rawGx = (int32_t)( ((uint32_t)buffer[7] << 12) | ((uint32_t)buffer[8] << 4) | (buffer[17] >> 4) );
-  rawGx = (rawGx << 12) >> 12;
-  int32_t rawGy = (int32_t)( ((uint32_t)buffer[9] << 12) | ((uint32_t)buffer[10] << 4) | (buffer[18] & 0x0F) );
-  rawGy = (rawGy << 12) >> 12;
-  int32_t rawGz = (int32_t)( ((uint32_t)buffer[11] << 12) | ((uint32_t)buffer[12] << 4) | (buffer[19] & 0x0F) );
-  rawGz = (rawGz << 12) >> 12;
-
-  if (rawAx == -524288 && rawAy == -524288 && rawAz == -524288) return false;
+  int32_t rawGx = (int32_t)((buffer[10] << 24) | (buffer[11] << 16) | (buffer[12] << 8)) >> 12;
+  int32_t rawGy = (int32_t)((buffer[13] << 24) | (buffer[14] << 16) | (buffer[15] << 8)) >> 12;
+  int32_t rawGz = (int32_t)((buffer[16] << 24) | (buffer[17] << 16) | (buffer[18] << 8)) >> 12;
 
   float scaleAccel20 = 16.0f / 524288.0f;
   float scaleGyro20  = 2000.0f / 524288.0f;
@@ -417,6 +409,7 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
   ax = ((float)rawAx * scaleAccel20 - accOffset[0]) * accScale[0];
   ay = ((float)rawAy * scaleAccel20 - accOffset[1]) * accScale[1];
   az = ((float)rawAz * scaleAccel20 - accOffset[2]) * accScale[2];
+  
   gx = (float)rawGx * scaleGyro20 - gyrOffset[0];
   gy = (float)rawGy * scaleGyro20 - gyrOffset[1];
   gz = (float)rawGz * scaleGyro20 - gyrOffset[2];
@@ -445,6 +438,7 @@ void ICM42688P::autoCalibrateGyro(uint16_t samples) {
       Serial.println(F("Error: Sensor read timeout during calibration."));
       break;
     }
+    
     if (micros() - lastMicros >= 1000) {
       lastMicros = micros();
       if(readIMU(ax, ay, az, gx, gy, gz)) {
@@ -459,9 +453,12 @@ void ICM42688P::autoCalibrateGyro(uint16_t samples) {
       gyrOffset[1] = (float)(gySum / count);
       gyrOffset[2] = (float)(gzSum / count);
   }
+  
   Serial.println(F("DONE. Results:"));
-  Serial.print(F("Gyro Bias: ")); Serial.print(gyrOffset[0], 4); Serial.print(", ");
-  Serial.print(gyrOffset[1], 4); Serial.print(", "); Serial.println(gyrOffset[2], 4);
+  Serial.print(F("Gyro Bias: "));
+  Serial.print(gyrOffset[0], 4); Serial.print(", ");
+  Serial.print(gyrOffset[1], 4); Serial.print(", ");
+  Serial.println(gyrOffset[2], 4);
 }
 
 void ICM42688P::autoCalibrateAccel() {
@@ -476,51 +473,94 @@ void ICM42688P::autoCalibrateAccel() {
   
   for (int i = 0; i < 6; i++) {
     Serial.print(F("\nPosition ")); Serial.print(i + 1); Serial.println(F("/6 -> Send 'y' to measure"));
+    
     while (Serial.available()) Serial.read(); 
+    
     unsigned long waitStart = millis();
     while (!Serial.available()) {
-      if (millis() - waitStart > 60000) { Serial.println(F("Timeout waiting for user input.")); return; }
+      if (millis() - waitStart > 60000) {
+         Serial.println(F("Timeout waiting for user input."));
+         return;
+      }
       yield();
     }
+    
     char cmd = Serial.read();
-    if (cmd == '\n' || cmd == '\r') { while(!Serial.available()) { yield(); } Serial.read(); }
+    if (cmd == '\n' || cmd == '\r') { 
+        while(!Serial.available()) { yield(); } 
+        Serial.read(); 
+    }
     
     Serial.println(F("Measuring..."));
-    double sumX = 0, sumY = 0, sumZ = 0; int count = 0;
-    unsigned long start = millis(); unsigned long lastMicros = micros();
+    double sumX = 0, sumY = 0, sumZ = 0;
+    int count = 0;
+    unsigned long start = millis();
+    unsigned long lastMicros = micros();
     
     while (millis() - start < 1500) {
       if (micros() - lastMicros >= 1000) { 
-        lastMicros = micros(); float ax, ay, az, gx, gy, gz;
-        if (readIMU(ax, ay, az, gx, gy, gz)) { sumX += ax; sumY += ay; sumZ += az; count++; }
+        lastMicros = micros();
+        float ax, ay, az, gx, gy, gz;
+        if (readIMU(ax, ay, az, gx, gy, gz)) {
+          sumX += ax; sumY += ay; sumZ += az; count++;
+        }
       }
     }
+    
     if (count == 0) { Serial.println(F("Error: No data from sensor!")); return; }
     
-    points[i].x = sumX / count; points[i].y = sumY / count; points[i].z = sumZ / count;
+    points[i].x = sumX / count; 
+    points[i].y = sumY / count; 
+    points[i].z = sumZ / count;
+    
     Serial.print(F("Raw G: ")); Serial.print(points[i].x); Serial.print(F(", "));
     Serial.print(points[i].y); Serial.print(F(", ")); Serial.println(points[i].z);
   }
   
   Serial.println(F("\nCalculating Sphere Fit..."));
-  float bx = 0, by = 0, bz = 0, sx = 1, sy = 1, sz = 1; float learningRate = 0.05;
+  float bx = 0, by = 0, bz = 0;
+  float sx = 1, sy = 1, sz = 1;
+  float learningRate = 0.05;
+  
   for (int iter = 0; iter < 2000; iter++) {
-    float dbx = 0, dby = 0, dbz = 0, dsx = 0, dsy = 0, dsz = 0;
+    float dbx = 0, dby = 0, dbz = 0;
+    float dsx = 0, dsy = 0, dsz = 0;
+    
     for (int i = 0; i < 6; i++) {
-      float adjX = (points[i].x - bx) * sx; float adjY = (points[i].y - by) * sy; float adjZ = (points[i].z - bz) * sz;
-      float radius = sqrt(adjX*adjX + adjY*adjY + adjZ*adjZ); float error = radius - 1.0f; float common = error / radius;
-      dbx += -2.0f * common * adjX * sx; dby += -2.0f * common * adjY * sy; dbz += -2.0f * common * adjZ * sz;
-      dsx += 2.0f * common * adjX * (points[i].x - bx); dsy += 2.0f * common * adjY * (points[i].y - by); dsz += 2.0f * common * adjZ * (points[i].z - bz);
+      float adjX = (points[i].x - bx) * sx;
+      float adjY = (points[i].y - by) * sy;
+      float adjZ = (points[i].z - bz) * sz;
+      
+      float radius = sqrt(adjX*adjX + adjY*adjY + adjZ*adjZ);
+      float error = radius - 1.0f;
+      float common = error / radius;
+      
+      dbx += -2.0f * common * adjX * sx;
+      dby += -2.0f * common * adjY * sy;
+      dbz += -2.0f * common * adjZ * sz;
+      
+      dsx += 2.0f * common * adjX * (points[i].x - bx);
+      dsy += 2.0f * common * adjY * (points[i].y - by);
+      dsz += 2.0f * common * adjZ * (points[i].z - bz);
     }
-    bx -= learningRate * (dbx / 6.0f); by -= learningRate * (dby / 6.0f); bz -= learningRate * (dbz / 6.0f);
-    sx -= learningRate * (dsx / 6.0f); sy -= learningRate * (dsy / 6.0f); sz -= learningRate * (dsz / 6.0f);
+    
+    bx -= learningRate * (dbx / 6.0f);
+    by -= learningRate * (dby / 6.0f);
+    bz -= learningRate * (dbz / 6.0f);
+    sx -= learningRate * (dsx / 6.0f);
+    sy -= learningRate * (dsy / 6.0f);
+    sz -= learningRate * (dsz / 6.0f);
+    
     if (iter % 200 == 0) learningRate *= 0.8;
   }
   
   accOffset[0] = bx; accOffset[1] = by; accOffset[2] = bz;
   accScale[0] = sx; accScale[1] = sy; accScale[2] = sz;
+  
   Serial.println(F("\n--- COPY TO SETUP() ---"));
-  Serial.print(F("IMU.setAccelOffset(")); Serial.print(bx, 5); Serial.print(F(", ")); Serial.print(by, 5); Serial.print(F(", ")); Serial.print(bz, 5); Serial.println(F(");"));
-  Serial.print(F("IMU.setAccelScale(")); Serial.print(sx, 5); Serial.print(F(", ")); Serial.print(sy, 5); Serial.print(F(", ")); Serial.print(sz, 5); Serial.println(F(");"));
+  Serial.print(F("IMU.setAccelOffset(")); 
+  Serial.print(bx, 5); Serial.print(F(", ")); Serial.print(by, 5); Serial.print(F(", ")); Serial.print(bz, 5); Serial.println(F(");"));
+  Serial.print(F("IMU.setAccelScale(")); 
+  Serial.print(sx, 5); Serial.print(F(", ")); Serial.print(sy, 5); Serial.print(F(", ")); Serial.print(sz, 5); Serial.println(F(");"));
   Serial.println(F("-----------------------"));
 }
