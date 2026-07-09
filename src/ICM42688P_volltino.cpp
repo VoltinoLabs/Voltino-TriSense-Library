@@ -259,15 +259,21 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
   writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x00);
 
   if (mode == FIFO_16BIT) {
-    // [VOLTINO FIX] 0x0F natvrdo zapne Accel, Gyro, Temp i Time. 
-    // Zaručí, že paket bude mít vždy přesně 16 bajtů a nerozhodí se offset!
+    // [VOLTINO FIX]: Aktivace Timestamp Engine (Bit 4 v TMST_CONFIG). 
+    // Zabraňuje pádu do 14-byte Packet Format 1 a ničení FIFO zarovnání.
+    uint8_t tmst = readRegister(ICM42688_REG_TMST_CONFIG);
+    writeRegister(ICM42688_REG_TMST_CONFIG, tmst | 0x10);
+
     writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x0F); 
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   } 
   else if (mode == FIFO_20BIT_HIRES) {
+    // [VOLTINO FIX]: To samé pro 20-bit HiRes režim.
+    uint8_t tmst = readRegister(ICM42688_REG_TMST_CONFIG);
+    writeRegister(ICM42688_REG_TMST_CONFIG, tmst | 0x10);
+
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
-    // [VOLTINO FIX] 0x1F pro 20 bajtů HighRes
     writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x1F); 
     writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);
   }
@@ -348,8 +354,6 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
 
   if (fifoCount < 16) return false; 
 
-  // [VOLTINO FIX] 2000 bajtů znamená téměř plný FIFO (max je 2048).
-  // Díky tomu knihovna už nemaže cenná data při každém zpoždění procesoru.
   if (fifoCount >= 2000) {
       writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); 
       return false;
@@ -358,7 +362,7 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   uint8_t buffer[16];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 16);
 
-  if ((buffer[0] & 0x80) != 0) { // Prázdná hlavička = chyba zarovnání
+  if ((buffer[0] & 0x80) != 0) { 
       writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x02); 
       return false; 
   }
@@ -439,10 +443,6 @@ float ICM42688P::readTemperature() {
   int16_t rawTemp = (int16_t)((buffer[0] << 8) | buffer[1]);
   return ((float)rawTemp / 132.48f) + 25.0f;
 }
-
-// ====================================================================
-// --- NEZKRÁCENÉ KALIBRAČNÍ FUNKCE (PRO ÚPLNOST SOUBORU) ---
-// ====================================================================
 
 void ICM42688P::autoCalibrateGyro(uint16_t samples) {
   Serial.println(F("GYRO CALIBRATION (SW)... Keep still."));

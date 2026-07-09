@@ -106,7 +106,6 @@ void TriSenseFusion::initOrientation(int samples) {
   FUSION_MATH_TYPE axSum=0, aySum=0, azSum=0, mxSum=0, mySum=0, mzSum=0; 
   int count = 0;
   
-  // Pročištění starého zásobníku před startem, aby se to nezaseklo hned na začátku
   if (_imu->getFIFOMode() != FIFO_NONE) {
       float ax, ay, az, gx, gy, gz;
       while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
@@ -135,7 +134,7 @@ void TriSenseFusion::initOrientation(int samples) {
          mxSum+=mx; mySum+=my; mzSum+=mz; 
          count++; 
      } else {
-         delay(1); // Uvolnění procesoru (nikoliv tvrdý delay po dobu sběru jako předtím)
+         delay(1); 
      }
   }
   
