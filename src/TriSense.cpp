@@ -78,9 +78,11 @@ void TriSenseFusion::setMaxGains(float accelGain, float magGain) { maxAccelGain 
 void TriSenseFusion::setMagCheckInterval(float intervalMs) { magCheckIntervalUs = (unsigned long)(intervalMs * 1000.0f); }
 void TriSenseFusion::setLocalGravity(float g) { _localGravity = g; }
 
+// ====================================================================
+// [VOLTINO FIX] Smart Gravity Detection pro kalibraci akcelerometru.
+// Eliminuje vznik fantomových sil při kalibraci vzhůru nohama / na boku.
+// ====================================================================
 void TriSenseFusion::calibrateAccelStatic(int samples) {
-  // WARNING: This assumes the sensor is perfectly flat (Z pointing up).
-  // If the sensor is tilted, this will store incorrect zeros!
   double sumX=0, sumY=0, sumZ=0; 
   int count = 0;
   
@@ -99,9 +101,29 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
     }
   }
   
-  accelOffset[0] = (float)(sumX / samples) - 0.0f; 
-  accelOffset[1] = (float)(sumY / samples) - 0.0f; 
-  accelOffset[2] = (float)(sumZ / samples) - 1.0f; 
+  float avgX = (float)(sumX / samples);
+  float avgY = (float)(sumY / samples);
+  float avgZ = (float)(sumZ / samples);
+  
+  // Detekce osy, která nese nejvíce gravitace
+  if (abs(avgZ) > 0.7f) {
+    accelOffset[0] = avgX;
+    accelOffset[1] = avgY;
+    accelOffset[2] = (avgZ > 0) ? (avgZ - 1.0f) : (avgZ + 1.0f);
+  } else if (abs(avgX) > 0.7f) {
+    accelOffset[0] = (avgX > 0) ? (avgX - 1.0f) : (avgX + 1.0f);
+    accelOffset[1] = avgY;
+    accelOffset[2] = avgZ;
+  } else if (abs(avgY) > 0.7f) {
+    accelOffset[0] = avgX;
+    accelOffset[1] = (avgY > 0) ? (avgY - 1.0f) : (avgY + 1.0f);
+    accelOffset[2] = avgZ;
+  } else {
+    // Fallback: Pokud s modulem během kalibrace někdo třásl
+    accelOffset[0] = avgX;
+    accelOffset[1] = avgY;
+    accelOffset[2] = avgZ - 1.0f; 
+  }
 }
 
 void TriSenseFusion::initOrientation(int samples) {
@@ -193,7 +215,7 @@ void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE a
 }
 
 // ====================================================================
-// [FIXED] Rotates local sensor data to Global (Earth) axes (WORLD FRAME).
+// Rotates local sensor data to Global (Earth) axes (WORLD FRAME).
 // Z is always pointing up relative to gravity.
 // ====================================================================
 void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
@@ -219,7 +241,7 @@ void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, Acce
 }
 
 // ====================================================================
-// [FIXED] Gets true linear acceleration in the sensor's BODY FRAME.
+// Gets true linear acceleration in the sensor's BODY FRAME.
 // Perfect for CanSat: extracts pure rocket thrust independently of tilt.
 // ====================================================================
 void TriSenseFusion::getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
@@ -259,11 +281,6 @@ void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, F
 
 SimpleTriFusion::SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
-// ============================================================
-// [FIXED] SimpleTriFusion::update()
-// Empties ALL available FIFO packets, each with dt = 1/ODR.
-// Prevents sample loss and rotation underestimation.
-// ============================================================
 bool SimpleTriFusion::update() {
   bool dataProcessed = false;
   
@@ -373,16 +390,10 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
 }
 
-// ============================================================
-// [FIXED] AdvancedTriFusion::update()
-// Same principle: empty all FIFO packets, integrate
-// each separately, and only then (once) perform magnetic correction.
-// ============================================================
 bool AdvancedTriFusion::update() {
   bool dataProcessed = false;
   
   if (_imu->getFIFOMode() == FIFO_NONE) {
-    // --- Direct register read mode ---
     float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
     if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
@@ -406,7 +417,6 @@ bool AdvancedTriFusion::update() {
                       (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, 
                       dt);
       
-      // Magnetic correction (only for polling mode - performed on every sample)
       unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;
@@ -427,14 +437,13 @@ bool AdvancedTriFusion::update() {
       }
     }
   } else {
-    // --- FIFO mode: empty ALL available packets ---
     int hz = _imu->getODRHz();
     FUSION_MATH_TYPE dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
     
     while (true) {
       float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
       if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
-        break; // FIFO empty
+        break; 
       }
       dataProcessed = true;
       
@@ -451,8 +460,6 @@ bool AdvancedTriFusion::update() {
                       dt);
     }
     
-    // Magnetic correction - performed ONCE after emptying the entire FIFO,
-    // not for each individual packet (magnetometer is slow)
     if (dataProcessed) {
       unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
