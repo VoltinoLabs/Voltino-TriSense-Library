@@ -78,7 +78,6 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
 
     Wire.beginTransmission(_i2cAddr);
     if (Wire.endTransmission() != 0) {
-      // Safe fallback probe if primary address does not ACK immediately
       uint8_t altAddr = (_i2cAddr == ICM_ADDR_PRIMARY) ? ICM_ADDR_SECONDARY : ICM_ADDR_PRIMARY;
       Wire.beginTransmission(altAddr);
       if (Wire.endTransmission() == 0) {
@@ -360,10 +359,20 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
 
   if (fifoCount < 16) return false; 
 
+  // [VOLTINO FIX] Self-healing FIFO mechanism: If buffer is excessively full, flush it!
+  if (fifoCount >= 1000) {
+      writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x04); // FIFO_FLUSH bit
+      return false;
+  }
+
   uint8_t buffer[16];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 16);
 
-  if ((buffer[0] & 0x80) != 0) return false; 
+  // [VOLTINO FIX] Self-healing: If header is corrupted, flush it!
+  if ((buffer[0] & 0x80) != 0) {
+      writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x04); // FIFO_FLUSH bit
+      return false; 
+  }
 
   int16_t rawAx = (int16_t)((buffer[1] << 8) | buffer[2]);
   int16_t rawAy = (int16_t)((buffer[3] << 8) | buffer[4]);
@@ -390,11 +399,20 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
 
   if (fifoCount < 20) return false; 
 
+  // [VOLTINO FIX] Self-healing FIFO mechanism
+  if (fifoCount >= 1000) {
+      writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x04); // FIFO_FLUSH bit
+      return false;
+  }
+
   uint8_t buffer[20];
   readRegisters(ICM42688_REG_FIFO_DATA, buffer, 20);
 
-  // Check valid header (HEADER_MSG bit 7 must be 0)
-  if ((buffer[0] & 0x80) != 0) return false;
+  // [VOLTINO FIX] Self-healing: If header is corrupted, flush it!
+  if ((buffer[0] & 0x80) != 0) {
+      writeRegister(ICM42688_REG_SIGNAL_PATH_RESET, 0x04); // FIFO_FLUSH bit
+      return false;
+  }
 
   // 20-bit extraction and sign extension (Packet Format 4)
   int32_t rawAx = (int32_t)( ((uint32_t)buffer[1] << 12) | ((uint32_t)buffer[2] << 4) | (buffer[17] & 0x0F) );

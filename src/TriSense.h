@@ -140,6 +140,7 @@ public:
 
   uint32_t _sampleCount = 0;
   unsigned long _lastOdrCheckTime = 0;
+  unsigned long _lastIntegrationTime = 0; // [VOLTINO FIX] Dynamic DT tracking for polling mode
   FUSION_MATH_TYPE _realDt = 0.001; 
 
   FUSION_MATH_TYPE gaussianGain(FUSION_MATH_TYPE x, FUSION_MATH_TYPE mu, FUSION_MATH_TYPE sigma);

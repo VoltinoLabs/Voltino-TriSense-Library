@@ -14,6 +14,7 @@
 #define ICM42688_REG_FIFO_COUNTH   0x2E 
 #define ICM42688_REG_FIFO_COUNTL   0x2F 
 #define ICM42688_REG_FIFO_DATA     0x30 
+#define ICM42688_REG_SIGNAL_PATH_RESET 0x4B // [VOLTINO FIX] Added for FIFO flushing
 #define ICM42688_REG_TMST_CONFIG   0x54
 #define ICM42688_REG_APEX_CONFIG0  0x56
 #define ICM42688_REG_SMD_CONFIG    0x57
@@ -90,6 +91,9 @@ public:
   void setFIFOMode(ICM_FIFO_MODE mode);
   
   int getODRHz(); 
+  
+  // [VOLTINO FIX] Helper method to dynamically adapt fusion integration based on buffer state
+  ICM_FIFO_MODE getFIFOMode() { return _fifoMode; } 
   
   // --- Data reading ---
   bool readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);

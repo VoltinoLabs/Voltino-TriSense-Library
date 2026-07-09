@@ -163,6 +163,7 @@ void TriSenseFusion::initOrientation(int samples) {
   _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
   
   _lastOdrCheckTime = micros();
+  _lastIntegrationTime = micros(); // [VOLTINO FIX]
   _sampleCount = 0;
 }
 
@@ -248,7 +249,6 @@ bool SimpleTriFusion::update() {
   float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw; 
   bool dataProcessed = false;
   
-  // [VOLTINO FIX] Odstraněna infinite-loop (while). Použito bezpečné 'if'.
   if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
       _sampleCount++;
@@ -260,10 +260,25 @@ bool SimpleTriFusion::update() {
       lastGy = gy_raw - gyroOffset[1];  
       lastGz = gz_raw - gyroOffset[2];
       
+      // --- [VOLTINO FIX] Dynamic DT for Hardware FIFO vs Polling ---
+      FUSION_MATH_TYPE dt;
+      unsigned long nowMicros = micros();
+
+      if (_imu->getFIFOMode() == FIFO_NONE) {
+          if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+          dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+          _lastIntegrationTime = nowMicros;
+
+          if (dt <= 0.0) dt = 0.00001;
+          if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
+      } else {
+          dt = _realDt;
+      }
+
       gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGy * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGz * (FUSION_MATH_TYPE)PI/180.0, 
-                      _realDt);
+                      dt);
   }
   
   if (!dataProcessed) return false;
@@ -276,7 +291,7 @@ bool SimpleTriFusion::update() {
           int nominalHz = _imu->getODRHz();
           FUSION_MATH_TYPE nominalDt = 1.0 / (FUSION_MATH_TYPE)(nominalHz > 0 ? nominalHz : 1000);
           
-          if (measuredDt > nominalDt * 0.85 && measuredDt < nominalDt * 1.15) {
+          if (measuredDt > nominalDt * 0.4 && measuredDt < nominalDt * 1.6) {
               _realDt = _realDt * 0.7 + measuredDt * 0.3; 
           }
       }
@@ -349,7 +364,6 @@ bool AdvancedTriFusion::update() {
   float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw; 
   bool dataProcessed = false;
   
-  // [VOLTINO FIX] Odstraněna infinite-loop (while). Použito bezpečné 'if'.
   if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
       _sampleCount++;
@@ -361,10 +375,25 @@ bool AdvancedTriFusion::update() {
       lastGy = gy_raw - gyroOffset[1]; 
       lastGz = gz_raw - gyroOffset[2];
       
+      // --- [VOLTINO FIX] Dynamic DT for Hardware FIFO vs Polling ---
+      FUSION_MATH_TYPE dt;
+      unsigned long nowMicros = micros();
+
+      if (_imu->getFIFOMode() == FIFO_NONE) {
+          if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+          dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+          _lastIntegrationTime = nowMicros;
+
+          if (dt <= 0.0) dt = 0.00001;
+          if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
+      } else {
+          dt = _realDt;
+      }
+
       gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGy * (FUSION_MATH_TYPE)PI/180.0, 
                       (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, 
-                      _realDt);
+                      dt);
   }
   
   if (!dataProcessed) return false;
@@ -377,7 +406,7 @@ bool AdvancedTriFusion::update() {
           int nominalHz = _imu->getODRHz();
           FUSION_MATH_TYPE nominalDt = 1.0 / (FUSION_MATH_TYPE)(nominalHz > 0 ? nominalHz : 1000);
           
-          if (measuredDt > nominalDt * 0.85 && measuredDt < nominalDt * 1.15) {
+          if (measuredDt > nominalDt * 0.4 && measuredDt < nominalDt * 1.6) {
               _realDt = _realDt * 0.7 + measuredDt * 0.3;
           }
       }
@@ -397,7 +426,6 @@ bool AdvancedTriFusion::update() {
      }
   }
 
-  // Těžká korekce - zavolá se pouze jednou na konci s využitím zjištěného časového rozdílu
   unsigned long correctionDeltaUs = now - lastSuccessfulCorrectionTime;
   FUSION_MATH_TYPE correction_dt = (FUSION_MATH_TYPE)correctionDeltaUs / 1000000.0;
   
