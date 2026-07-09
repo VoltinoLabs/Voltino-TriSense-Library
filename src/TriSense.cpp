@@ -1,6 +1,5 @@
 #include "TriSense.h"
 
-// --- OPRAVA: Odstraněno : mag(Wire), AK09918C se umí inicializovat samo ---
 TriSense::TriSense() {}
 
 bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
@@ -17,14 +16,11 @@ bool TriSense::beginAll(TriSenseMode mode, uint8_t spiCsPin, uint32_t spiFreq) {
     imu.setODR(DEFAULT_IMU_SPI_ODR); 
   }
 
-  // --- KRITICKÁ OPRAVA: Zapnutí FIFO ---
   imu.setFIFOMode(FIFO_16BIT);
 
   bmp.setOversampling(BMP580_OSR_x2, BMP580_OSR_x2);
   bmp.setODR(BMP580_ODR_240Hz);
   bmp.setPowerMode(BMP580_MODE_NORMAL);
-  
-  // OPRAVENO: Použití čistého enumu chráněného makrem z TriSense.h
   mag.setODR(AK_ODR_100HZ); 
   
   return true;
@@ -37,10 +33,6 @@ bool TriSense::beginIMU(ICM_BUS busType, uint8_t csPin, uint32_t freq) { return 
 void TriSense::resetHardwareOffsets() { imu.resetHardwareOffsets(); }
 void TriSense::autoCalibrateGyro(uint16_t samples) { imu.autoCalibrateGyro(samples); }
 void TriSense::autoCalibrateAccel() { imu.autoCalibrateAccel(); }
-
-// ---------------------------------------------------------
-// DATA ACCESSIBILITY & WRAPPERS
-// ---------------------------------------------------------
 
 bool TriSense::getSnapshot(TriSenseDataSnapshot &data) {
   float ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
@@ -60,10 +52,6 @@ bool TriSense::getSnapshot(TriSenseDataSnapshot &data) {
 float TriSense::readPressure() { return bmp.readPressure(); }
 float TriSense::readTemperature() { return bmp.readTemperature(); }
 float TriSense::readAltitude(float seaLevelPressure) { return bmp.readAltitude(seaLevelPressure); }
-
-// ---------------------------------------------------------
-// CORE TRISENSE FUSION IMPLEMENTATION
-// ---------------------------------------------------------
 
 TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {}
 
@@ -92,14 +80,19 @@ void TriSenseFusion::setLocalGravity(float g) { _localGravity = g; }
 
 void TriSenseFusion::calibrateAccelStatic(int samples) {
   double sumX=0, sumY=0, sumZ=0; 
-  float ax, ay, az, gx, gy, gz;
   int count = 0;
   
+  // [VOLTINO FIX] Uvolnění zásobníku pro hladký průběh kalibrace
+  if (_imu->getFIFOMode() != FIFO_NONE) {
+      float ax, ay, az, gx, gy, gz;
+      while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
+  }
+
   while(count < samples) { 
+    float ax, ay, az, gx, gy, gz;
     if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
       sumX += ax; sumY += ay; sumZ += az; 
       count++;
-      delay(1); 
     } else {
       delay(1); 
     }
@@ -114,16 +107,19 @@ void TriSenseFusion::initOrientation(int samples) {
   FUSION_MATH_TYPE axSum=0, aySum=0, azSum=0, mxSum=0, mySum=0, mzSum=0; 
   int count = 0;
   
+  // [VOLTINO FIX] Spláchnutí FIFO a zajištění, že nás pomalý Magnetometr neudusí
+  if (_imu->getFIFOMode() != FIFO_NONE) {
+      float ax, ay, az, gx, gy, gz;
+      while(_imu->readFIFO(ax, ay, az, gx, gy, gz));
+  }
+
   while(count < samples) {
      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
      
      bool imuReady = _imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw);
-     bool magReady = false;
-     if (imuReady) {
-         magReady = _mag->readData();
-     }
+     _mag->readData(); // Nezávisle žádáme o Mag (když data nejsou, drží stará, a to nám stačí)
 
-     if(imuReady && magReady) {
+     if(imuReady) {
          FUSION_MATH_TYPE ax = ax_raw - accelOffset[0]; 
          FUSION_MATH_TYPE ay = ay_raw - accelOffset[1]; 
          FUSION_MATH_TYPE az = az_raw - accelOffset[2]; 
@@ -138,7 +134,8 @@ void TriSenseFusion::initOrientation(int samples) {
          FUSION_MATH_TYPE mz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
          
          mxSum+=mx; mySum+=my; mzSum+=mz; 
-         count++; delay(2);
+         count++; 
+         // Vyndáno nesmyslné delay(2)! Chceme vysypat FIFO plnou rychlostí senzoru!
      } else {
          delay(1);
      }
@@ -163,7 +160,7 @@ void TriSenseFusion::initOrientation(int samples) {
   _realDt = (nominalHz > 0) ? (1.0 / (FUSION_MATH_TYPE)nominalHz) : 0.001;
   
   _lastOdrCheckTime = micros();
-  _lastIntegrationTime = micros(); // [VOLTINO FIX]
+  _lastIntegrationTime = micros(); 
   _sampleCount = 0;
 }
 
@@ -222,11 +219,7 @@ void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, Acce
 
 void TriSenseFusion::getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
   getGlobalAcceleration(ax, ay, az, unit);
-  if (unit == ACCEL_UNIT_MS2) {
-     az -= _localGravity; 
-  } else {
-     az -= 1.0f;           
-  }
+  if (unit == ACCEL_UNIT_MS2) az -= _localGravity; else az -= 1.0f;           
 }
 
 void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz, FUSION_MATH_TYPE dt) {
@@ -238,10 +231,6 @@ void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, F
   FUSION_MATH_TYPE recipNorm = 1.0 / sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]); 
   q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
 }
-
-// =========================================================
-// SIMPLE FUSION
-// =========================================================
 
 SimpleTriFusion::SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
@@ -260,7 +249,6 @@ bool SimpleTriFusion::update() {
       lastGy = gy_raw - gyroOffset[1];  
       lastGz = gz_raw - gyroOffset[2];
       
-      // --- [VOLTINO FIX] Dynamic DT for Hardware FIFO vs Polling ---
       FUSION_MATH_TYPE dt;
       unsigned long nowMicros = micros();
 
@@ -268,7 +256,6 @@ bool SimpleTriFusion::update() {
           if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
           dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
           _lastIntegrationTime = nowMicros;
-
           if (dt <= 0.0) dt = 0.00001;
           if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
       } else {
@@ -277,8 +264,7 @@ bool SimpleTriFusion::update() {
 
       gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGy * (FUSION_MATH_TYPE)PI/180.0, 
-                      lastGz * (FUSION_MATH_TYPE)PI/180.0, 
-                      dt);
+                      lastGz * (FUSION_MATH_TYPE)PI/180.0, dt);
   }
   
   if (!dataProcessed) return false;
@@ -298,13 +284,8 @@ bool SimpleTriFusion::update() {
       _lastOdrCheckTime = now;
       _sampleCount = 0;
   }
-  
   return true;
 }
-
-// =========================================================
-// ADVANCED FUSION
-// =========================================================
 
 AdvancedTriFusion::AdvancedTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
@@ -375,7 +356,6 @@ bool AdvancedTriFusion::update() {
       lastGy = gy_raw - gyroOffset[1]; 
       lastGz = gz_raw - gyroOffset[2];
       
-      // --- [VOLTINO FIX] Dynamic DT for Hardware FIFO vs Polling ---
       FUSION_MATH_TYPE dt;
       unsigned long nowMicros = micros();
 
@@ -383,7 +363,6 @@ bool AdvancedTriFusion::update() {
           if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
           dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
           _lastIntegrationTime = nowMicros;
-
           if (dt <= 0.0) dt = 0.00001;
           if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
       } else {
@@ -392,8 +371,7 @@ bool AdvancedTriFusion::update() {
 
       gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
                       lastGy * (FUSION_MATH_TYPE)PI/180.0, 
-                      (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, 
-                      dt);
+                      (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, dt);
   }
   
   if (!dataProcessed) return false;
@@ -405,7 +383,6 @@ bool AdvancedTriFusion::update() {
           FUSION_MATH_TYPE measuredDt = (FUSION_MATH_TYPE)(now - _lastOdrCheckTime) / 1000000.0 / (FUSION_MATH_TYPE)_sampleCount;
           int nominalHz = _imu->getODRHz();
           FUSION_MATH_TYPE nominalDt = 1.0 / (FUSION_MATH_TYPE)(nominalHz > 0 ? nominalHz : 1000);
-          
           if (measuredDt > nominalDt * 0.4 && measuredDt < nominalDt * 1.6) {
               _realDt = _realDt * 0.7 + measuredDt * 0.3;
           }
@@ -428,7 +405,6 @@ bool AdvancedTriFusion::update() {
 
   unsigned long correctionDeltaUs = now - lastSuccessfulCorrectionTime;
   FUSION_MATH_TYPE correction_dt = (FUSION_MATH_TYPE)correctionDeltaUs / 1000000.0;
-  
   if (correction_dt > 0.1 || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01;
   
   complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
