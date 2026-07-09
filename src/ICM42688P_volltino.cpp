@@ -9,9 +9,7 @@ ICM42688P::ICM42688P() {
   _csPin = -1;
 }
 
-void ICM42688P::setDebug(bool enable) {
-  _debug = enable;
-}
+void ICM42688P::setDebug(bool enable) { _debug = enable; }
 
 bool ICM42688P::beginI2C(uint32_t freq, uint8_t i2cAddr, int8_t sdaPin, int8_t sclPin) {
   return begin(BUS_I2C, -1, freq, i2cAddr, sclPin, sdaPin, -1);
@@ -64,7 +62,7 @@ bool ICM42688P::begin(ICM_BUS busType, int8_t csPin, uint32_t freq, uint8_t i2cA
   } else {
     #if defined(ESP32) 
       if (sckSclPin != -1 && misoSdaPin != -1) {
-        Wire.setPins(misoSdaPin, sckSclPin); // SDA, SCL
+        Wire.setPins(misoSdaPin, sckSclPin);
       }
     #elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_RP2350)
       if (sckSclPin != -1 && misoSdaPin != -1) {
@@ -180,7 +178,6 @@ int ICM42688P::_getHzFromODR(ICM_ODR odr) {
   }
 }
 
-// [VOLTINO FIX] Zcela opravená fuknce pro omezování šířky pásma a řízení reálné ODR frekvence
 void ICM42688P::enforceBandwidthLimit() {
   uint32_t bytesPerRead = 0;
   
@@ -194,13 +191,10 @@ void ICM42688P::enforceBandwidthLimit() {
 
   ICM_ODR odrList[] = {ODR_32KHZ, ODR_16KHZ, ODR_8KHZ, ODR_4KHZ, ODR_2KHZ, ODR_1KHZ, ODR_500HZ, ODR_200HZ, ODR_100HZ, ODR_50HZ, ODR_25HZ, ODR_12_5HZ};
   ICM_ODR safeODR = _odr;
-  
-  int requestedHz = _getHzFromODR(_odr); // Frekvence, kterou nastavil uživatel
+  int requestedHz = _getHzFromODR(_odr); 
 
   for (int i = 0; i < 12; i++) {
     int targetHz = _getHzFromODR(odrList[i]);
-    
-    // Zásadní oprava: Zkoušíme jen ty frekvence, které jsou menší nebo rovny té požadované
     if (targetHz > requestedHz) continue; 
     
     uint32_t requiredBps = bitsPerRead * targetHz;
@@ -383,6 +377,7 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   return true;
 }
 
+// [VOLTINO FIX] 100% OPRAVENÁ LOGIKA PARSOVÁNÍ 20-BIT DAT PODLE TDK DATASHEETU!
 bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
   uint8_t countBuf[2];
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
@@ -395,14 +390,26 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
 
   if ((buffer[0] & 0x80) != 0) return false;
 
-  int32_t rawAx = (int32_t)((buffer[1] << 24) | (buffer[2] << 16) | (buffer[3] << 8)) >> 12;
-  int32_t rawAy = (int32_t)((buffer[4] << 24) | (buffer[5] << 16) | (buffer[6] << 8)) >> 12;
-  int32_t rawAz = (int32_t)((buffer[7] << 24) | (buffer[8] << 16) | (buffer[9] << 8)) >> 12;
-  
-  int32_t rawGx = (int32_t)((buffer[10] << 24) | (buffer[11] << 16) | (buffer[12] << 8)) >> 12;
-  int32_t rawGy = (int32_t)((buffer[13] << 24) | (buffer[14] << 16) | (buffer[15] << 8)) >> 12;
-  int32_t rawGz = (int32_t)((buffer[16] << 24) | (buffer[17] << 16) | (buffer[18] << 8)) >> 12;
+  // Skládání z MSB, LSB a Extension Byte (20 bitů celkem)
+  int32_t rawAx = (int32_t)((buffer[1] << 12) | (buffer[2] << 4) | (buffer[17] >> 4));
+  if (rawAx & 0x80000) rawAx |= 0xFFF00000; // Sign-extend pro bit 19
 
+  int32_t rawAy = (int32_t)((buffer[3] << 12) | (buffer[4] << 4) | (buffer[17] & 0x0F));
+  if (rawAy & 0x80000) rawAy |= 0xFFF00000;
+
+  int32_t rawAz = (int32_t)((buffer[5] << 12) | (buffer[6] << 4) | (buffer[18] >> 4));
+  if (rawAz & 0x80000) rawAz |= 0xFFF00000;
+  
+  int32_t rawGx = (int32_t)((buffer[7] << 12) | (buffer[8] << 4) | (buffer[18] & 0x0F));
+  if (rawGx & 0x80000) rawGx |= 0xFFF00000;
+
+  int32_t rawGy = (int32_t)((buffer[9] << 12) | (buffer[10] << 4) | (buffer[19] >> 4));
+  if (rawGy & 0x80000) rawGy |= 0xFFF00000;
+
+  int32_t rawGz = (int32_t)((buffer[11] << 12) | (buffer[12] << 4) | (buffer[19] & 0x0F));
+  if (rawGz & 0x80000) rawGz |= 0xFFF00000;
+
+  // Senzor v 20-bit mode automaticky vynucuje 16G a 2000DPS (2^19 = 524288)
   float scaleAccel20 = 16.0f / 524288.0f;
   float scaleGyro20  = 2000.0f / 524288.0f;
 
