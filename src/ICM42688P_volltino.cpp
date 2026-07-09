@@ -438,5 +438,147 @@ float ICM42688P::readTemperature() {
   return ((float)rawTemp / 132.48f) + 25.0f;
 }
 
-void ICM42688P::autoCalibrateGyro(uint16_t samples) { /* nezměněno */ }
-void ICM42688P::autoCalibrateAccel() { /* nezměněno */ }
+// ====================================================================
+// --- ZDE JSOU ZPĚT TVÉ DVĚ KOMPLETNÍ FUNKCE PRO KALIBRACI ---
+// ====================================================================
+
+void ICM42688P::autoCalibrateGyro(uint16_t samples) {
+  Serial.println(F("GYRO CALIBRATION (SW)... Keep still."));
+  gyrOffset[0] = 0; gyrOffset[1] = 0; gyrOffset[2] = 0;
+  double gxSum = 0, gySum = 0, gzSum = 0;
+  float ax, ay, az, gx, gy, gz;
+  int count = 0;
+  unsigned long startT = millis();
+  unsigned long lastMicros = micros();
+  
+  while(count < samples) {
+    if (millis() - startT > 10000) { 
+      Serial.println(F("Error: Sensor read timeout during calibration."));
+      break;
+    }
+    
+    if (micros() - lastMicros >= 1000) {
+      lastMicros = micros();
+      if(readIMU(ax, ay, az, gx, gy, gz)) {
+        gxSum += gx; gySum += gy; gzSum += gz;
+        count++;
+      }
+    }
+  }
+  
+  if (count > 0) {
+      gyrOffset[0] = (float)(gxSum / count);
+      gyrOffset[1] = (float)(gySum / count);
+      gyrOffset[2] = (float)(gzSum / count);
+  }
+  
+  Serial.println(F("DONE. Results:"));
+  Serial.print(F("Gyro Bias: "));
+  Serial.print(gyrOffset[0], 4); Serial.print(", ");
+  Serial.print(gyrOffset[1], 4); Serial.print(", ");
+  Serial.println(gyrOffset[2], 4);
+}
+
+void ICM42688P::autoCalibrateAccel() {
+  Serial.println(F("\n=== 6-POINT ACCEL CALIBRATION (SW) ==="));
+  Serial.println(F("Place sensor in 6 orientations (Z+, Z-, Y+, Y-, X+, X-)"));
+  
+  accOffset[0] = 0; accOffset[1] = 0; accOffset[2] = 0;
+  accScale[0] = 1; accScale[1] = 1; accScale[2] = 1;
+  
+  struct Vector { float x, y, z; };
+  Vector points[6];
+  
+  for (int i = 0; i < 6; i++) {
+    Serial.print(F("\nPosition ")); Serial.print(i + 1); Serial.println(F("/6 -> Send 'y' to measure"));
+    
+    while (Serial.available()) Serial.read(); 
+    
+    unsigned long waitStart = millis();
+    while (!Serial.available()) {
+      if (millis() - waitStart > 60000) {
+         Serial.println(F("Timeout waiting for user input."));
+         return;
+      }
+      yield();
+    }
+    
+    char cmd = Serial.read();
+    if (cmd == '\n' || cmd == '\r') { 
+        while(!Serial.available()) { yield(); } 
+        Serial.read(); 
+    }
+    
+    Serial.println(F("Measuring..."));
+    double sumX = 0, sumY = 0, sumZ = 0;
+    int count = 0;
+    unsigned long start = millis();
+    unsigned long lastMicros = micros();
+    
+    while (millis() - start < 1500) {
+      if (micros() - lastMicros >= 1000) { 
+        lastMicros = micros();
+        float ax, ay, az, gx, gy, gz;
+        if (readIMU(ax, ay, az, gx, gy, gz)) {
+          sumX += ax; sumY += ay; sumZ += az; count++;
+        }
+      }
+    }
+    
+    if (count == 0) { Serial.println(F("Error: No data from sensor!")); return; }
+    
+    points[i].x = sumX / count; 
+    points[i].y = sumY / count; 
+    points[i].z = sumZ / count;
+    
+    Serial.print(F("Raw G: ")); Serial.print(points[i].x); Serial.print(F(", "));
+    Serial.print(points[i].y); Serial.print(F(", ")); Serial.println(points[i].z);
+  }
+  
+  Serial.println(F("\nCalculating Sphere Fit..."));
+  float bx = 0, by = 0, bz = 0;
+  float sx = 1, sy = 1, sz = 1;
+  float learningRate = 0.05;
+  
+  for (int iter = 0; iter < 2000; iter++) {
+    float dbx = 0, dby = 0, dbz = 0;
+    float dsx = 0, dsy = 0, dsz = 0;
+    
+    for (int i = 0; i < 6; i++) {
+      float adjX = (points[i].x - bx) * sx;
+      float adjY = (points[i].y - by) * sy;
+      float adjZ = (points[i].z - bz) * sz;
+      
+      float radius = sqrt(adjX*adjX + adjY*adjY + adjZ*adjZ);
+      float error = radius - 1.0f;
+      float common = error / radius;
+      
+      dbx += -2.0f * common * adjX * sx;
+      dby += -2.0f * common * adjY * sy;
+      dbz += -2.0f * common * adjZ * sz;
+      
+      dsx += 2.0f * common * adjX * (points[i].x - bx);
+      dsy += 2.0f * common * adjY * (points[i].y - by);
+      dsz += 2.0f * common * adjZ * (points[i].z - bz);
+    }
+    
+    bx -= learningRate * (dbx / 6.0f);
+    by -= learningRate * (dby / 6.0f);
+    bz -= learningRate * (dbz / 6.0f);
+    sx -= learningRate * (dsx / 6.0f);
+    sy -= learningRate * (dsy / 6.0f);
+    sz -= learningRate * (dsz / 6.0f);
+    
+    if (iter % 200 == 0) learningRate *= 0.8;
+  }
+  
+  accOffset[0] = bx; accOffset[1] = by; accOffset[2] = bz;
+  accScale[0] = sx; accScale[1] = sy; accScale[2] = sz;
+  
+  Serial.println(F("\n--- COPY TO SETUP() ---"));
+  Serial.print(F("IMU.setAccelOffset(")); 
+  Serial.print(bx, 5); Serial.print(F(", ")); Serial.print(by, 5); Serial.print(F(", ")); Serial.print(bz, 5); Serial.println(F(");"));
+  Serial.print(F("IMU.setAccelScale(")); 
+  Serial.print(sx, 5); Serial.print(F(", ")); Serial.print(sy, 5); Serial.print(F(", ")); Serial.print(sz, 5); Serial.println(F(");"));
+  Serial.println(F("-----------------------"));
+}
