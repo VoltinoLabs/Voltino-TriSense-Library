@@ -79,6 +79,8 @@ void TriSenseFusion::setMagCheckInterval(float intervalMs) { magCheckIntervalUs 
 void TriSenseFusion::setLocalGravity(float g) { _localGravity = g; }
 
 void TriSenseFusion::calibrateAccelStatic(int samples) {
+  // WARNING: This assumes the sensor is perfectly flat (Z pointing up).
+  // If the sensor is tilted, this will store incorrect zeros!
   double sumX=0, sumY=0, sumZ=0; 
   int count = 0;
   
@@ -190,16 +192,20 @@ void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE a
   if (yaw < 0) yaw += 360.0; if (yaw >= 360.0) yaw -= 360.0;
 }
 
+// ====================================================================
+// [FIXED] Rotates local sensor data to Global (Earth) axes (WORLD FRAME).
+// Z is always pointing up relative to gravity.
+// ====================================================================
 void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
   FUSION_MATH_TYPE qw = q[0], qx = q[1], qy = q[2], qz = q[3]; 
-  FUSION_MATH_TYPE x2 = qx + qx, y2 = qy + qy, z2 = qz + qz;
-  FUSION_MATH_TYPE xx = qx * x2, xy = qx * y2, xz = qx * z2; 
-  FUSION_MATH_TYPE yy = qy * y2, yz = qy * z2, zz = qz * z2; 
-  FUSION_MATH_TYPE wx = qw * x2, wy = qw * y2, wz = qw * z2;
   
-  FUSION_MATH_TYPE ax_g = (1.0 - (yy + zz)) * lastAx + (xy - wz) * lastAy + (xz + wy) * lastAz;
-  FUSION_MATH_TYPE ay_g = (xy + wz) * lastAx + (1.0 - (xx + zz)) * lastAy + (yz - wx) * lastAz;
-  FUSION_MATH_TYPE az_g = (xz - wy) * lastAx + (yz + wx) * lastAy + (1.0 - (xx + yy)) * lastAz;
+  FUSION_MATH_TYPE xx = qx * qx, yy = qy * qy, zz = qz * qz;
+  FUSION_MATH_TYPE xy = qx * qy, xz = qx * qz, yz = qy * qz;
+  FUSION_MATH_TYPE wx = qw * qx, wy = qw * qy, wz = qw * qz;
+  
+  FUSION_MATH_TYPE ax_g = (1.0 - 2.0*(yy + zz)) * lastAx + 2.0*(xy - wz) * lastAy + 2.0*(xz + wy) * lastAz;
+  FUSION_MATH_TYPE ay_g = 2.0*(xy + wz) * lastAx + (1.0 - 2.0*(xx + zz)) * lastAy + 2.0*(yz - wx) * lastAz;
+  FUSION_MATH_TYPE az_g = 2.0*(xz - wy) * lastAx + 2.0*(yz + wx) * lastAy + (1.0 - 2.0*(xx + yy)) * lastAz;
 
   if (unit == ACCEL_UNIT_MS2) {
      ax = (float)(ax_g * _localGravity);
@@ -212,9 +218,32 @@ void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, Acce
   }
 }
 
+// ====================================================================
+// [FIXED] Gets true linear acceleration in the sensor's BODY FRAME.
+// Perfect for CanSat: extracts pure rocket thrust independently of tilt.
+// ====================================================================
 void TriSenseFusion::getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
-  getGlobalAcceleration(ax, ay, az, unit);
-  if (unit == ACCEL_UNIT_MS2) az -= _localGravity; else az -= 1.0f;           
+  FUSION_MATH_TYPE qw = q[0], qx = q[1], qy = q[2], qz = q[3]; 
+
+  // 1. Gravity (1G on Z) projected backwards into the local sensor axes (BODY FRAME)
+  FUSION_MATH_TYPE grav_x = 2.0 * (qx * qz - qw * qy);
+  FUSION_MATH_TYPE grav_y = 2.0 * (qw * qx + qy * qz);
+  FUSION_MATH_TYPE grav_z = 1.0 - 2.0 * (qx * qx + qy * qy);
+
+  // 2. Subtract projected gravity from raw acceleration
+  FUSION_MATH_TYPE lin_x = lastAx - grav_x;
+  FUSION_MATH_TYPE lin_y = lastAy - grav_y;
+  FUSION_MATH_TYPE lin_z = lastAz - grav_z;
+
+  if (unit == ACCEL_UNIT_MS2) {
+     ax = (float)(lin_x * _localGravity);
+     ay = (float)(lin_y * _localGravity);
+     az = (float)(lin_z * _localGravity);
+  } else {
+     ax = (float)lin_x;
+     ay = (float)lin_y;
+     az = (float)lin_z;
+  }
 }
 
 void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, FUSION_MATH_TYPE gz, FUSION_MATH_TYPE dt) {
@@ -231,17 +260,15 @@ void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, F
 SimpleTriFusion::SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
 // ============================================================
-// [VOLTINO FIX] SimpleTriFusion::update()
-// Completely rewritten: FIFO mode now empties ALL
-// available packets, each with dt = 1/ODR, to prevent
-// sample loss and rotation underestimation.
+// [FIXED] SimpleTriFusion::update()
+// Empties ALL available FIFO packets, each with dt = 1/ODR.
+// Prevents sample loss and rotation underestimation.
 // ============================================================
 bool SimpleTriFusion::update() {
   bool dataProcessed = false;
   
   if (_imu->getFIFOMode() == FIFO_NONE) {
     // --- Direct register read mode (polling) ---
-    // dt is measured from the actual time between calls
     float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
     if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
@@ -266,14 +293,13 @@ bool SimpleTriFusion::update() {
     }
   } else {
     // --- FIFO mode: empty ALL available packets ---
-    // Each packet represents exactly 1/ODR seconds of gyro data
     int hz = _imu->getODRHz();
     FUSION_MATH_TYPE dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
     
     while (true) {
       float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
       if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
-        break; // FIFO empty - all data processed
+        break; // FIFO empty
       }
       dataProcessed = true;
       
@@ -348,10 +374,9 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
 }
 
 // ============================================================
-// [VOLTINO FIX] AdvancedTriFusion::update()
+// [FIXED] AdvancedTriFusion::update()
 // Same principle: empty all FIFO packets, integrate
-// each separately, and only then (once) perform magnetic
-// correction.
+// each separately, and only then (once) perform magnetic correction.
 // ============================================================
 bool AdvancedTriFusion::update() {
   bool dataProcessed = false;
