@@ -349,17 +349,11 @@ bool SimpleTriFusion::update() {
       trackUpdateRate();
     }
   } else {
-    // VOLTINO UPDATE: Perfect DT Array Logic
-    unsigned long nowMicros = micros();
-    if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
-    FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
-    _lastIntegrationTime = nowMicros;
-    if (total_dt <= 0.0) total_dt = 0.00001;
-
+    // === OPRAVA: POUZE VYČTU BUFFER ===
     #if defined(__AVR__)
-      const int max_packets = 16;  // Ochrana RAM (jen 2KB SRAM) pro staré desky
+      const int max_packets = 16;  
     #else
-      const int max_packets = 128; // RP2350 / ESP32 pojme s klidem plný ICM-42688 buffer
+      const int max_packets = 128; 
     #endif
 
     struct FIFOPacket { float ax, ay, az, gx, gy, gz; };
@@ -376,12 +370,21 @@ bool SimpleTriFusion::update() {
 
     if (packetCount > 0) {
         dataProcessed = true;
+        
+        // === OPRAVA: MĚŘENÍ ČASU POUZE KDYŽ MÁME DATA ===
+        unsigned long nowMicros = micros();
+        if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+        FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+        _lastIntegrationTime = nowMicros; // Fix here!
+        
+        if (total_dt <= 0.0) total_dt = 0.00001;
         FUSION_MATH_TYPE perfect_dt = total_dt / (FUSION_MATH_TYPE)packetCount;
 
-        // Ochrana proti zablokování OS - fallback na ideální frekvenci senzoru
+        // Bezpečnostní mantinely pro DT v případě záseku mikrokontroléru
         int hz = _imu->getODRHz();
-        FUSION_MATH_TYPE max_dt = (hz > 0) ? (5.0 / (FUSION_MATH_TYPE)hz) : 0.05;
-        if (perfect_dt > max_dt) perfect_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
+        FUSION_MATH_TYPE ideal_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
+        if (perfect_dt > ideal_dt * 2.0) perfect_dt = ideal_dt;
+        if (perfect_dt < ideal_dt * 0.5) perfect_dt = ideal_dt;
 
         for(int i = 0; i < packetCount; i++) {
             float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
@@ -528,13 +531,7 @@ bool AdvancedTriFusion::update() {
       }
     }
   } else {
-    // VOLTINO UPDATE: Perfect DT Array Logic pro Advanced Fusion
-    unsigned long nowMicros = micros();
-    if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
-    FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
-    _lastIntegrationTime = nowMicros;
-    if (total_dt <= 0.0) total_dt = 0.00001;
-
+    // === OPRAVA: POUZE VYČTU BUFFER ===
     #if defined(__AVR__)
       const int max_packets = 16;
     #else
@@ -555,11 +552,21 @@ bool AdvancedTriFusion::update() {
     
     if (packetCount > 0) {
       dataProcessed = true;
+      
+      // === OPRAVA: MĚŘENÍ ČASU POUZE KDYŽ MÁME DATA ===
+      unsigned long nowMicros = micros();
+      if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+      FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+      _lastIntegrationTime = nowMicros; // Fix here!
+      
+      if (total_dt <= 0.0) total_dt = 0.00001;
       FUSION_MATH_TYPE perfect_dt = total_dt / (FUSION_MATH_TYPE)packetCount;
 
+      // Bezpečnostní mantinely
       int hz = _imu->getODRHz();
-      FUSION_MATH_TYPE max_dt = (hz > 0) ? (5.0 / (FUSION_MATH_TYPE)hz) : 0.05;
-      if (perfect_dt > max_dt) perfect_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
+      FUSION_MATH_TYPE ideal_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.05;
+      if (perfect_dt > ideal_dt * 2.0) perfect_dt = ideal_dt;
+      if (perfect_dt < ideal_dt * 0.5) perfect_dt = ideal_dt;
 
       for(int i = 0; i < packetCount; i++) {
           float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
@@ -577,6 +584,7 @@ bool AdvancedTriFusion::update() {
           trackUpdateRate();
       }
       
+      // Aplikace pomalé komplementární korekce (jen jednou za batch pro úsporu výkonu)
       unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;
