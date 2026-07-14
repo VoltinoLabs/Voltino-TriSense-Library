@@ -160,7 +160,7 @@ int ICM42688P::getODRHz() {
   return _getHzFromODR(_odr);
 }
 
-// ADDED THIS FUNCTION:
+// [VOLTINO FIX] FIFO Helper Method
 ICM_FIFO_MODE ICM42688P::getFIFOMode() {
   return _fifoMode;
 }
@@ -275,16 +275,16 @@ void ICM42688P::setFIFOMode(ICM_FIFO_MODE mode) {
 
   if (mode == FIFO_16BIT) {
     // Stream-to-FIFO + ACCEL_EN + GYRO_EN
-    // Without ACCEL_EN and GYRO_EN FIFO receives no data! (Datasheet §6.4)
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x03);  // FIFO_ACCEL_EN | FIFO_GYRO_EN
-    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    // Stream-to-FIFO mode
+    // Without ACCEL_EN and GYRO_EN FIFO receives no data!
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x03);  
+    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    
   } 
   else if (mode == FIFO_20BIT_HIRES) {
     setAccelFS(AFS_16G);
     setGyroFS(GFS_2000DPS);
     // HIRES_EN + ACCEL_EN + GYRO_EN (all 3 bits required!)
-    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x13);  // FIFO_HIRES_EN | FIFO_ACCEL_EN | FIFO_GYRO_EN
-    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    // Stream-to-FIFO mode
+    writeRegister(ICM42688_REG_FIFO_CONFIG1, 0x13);  
+    writeRegister(ICM42688_REG_FIFO_CONFIG, 0x40);    
   }
   
   enforceBandwidthLimit(); 
@@ -325,14 +325,10 @@ void ICM42688P::setBank(uint8_t bank) { writeRegister(ICM42688_REG_BANK_SEL, ban
 
 bool ICM42688P::readIMU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
   switch (_fifoMode) {
-    case FIFO_NONE:
-      return readSensorData(ax, ay, az, gx, gy, gz);
-    case FIFO_16BIT:
-      return readHardwareFIFO(ax, ay, az, gx, gy, gz);
-    case FIFO_20BIT_HIRES:
-      return readHardwareFIFOHires(ax, ay, az, gx, gy, gz);
-    default:
-      return false;
+    case FIFO_NONE: return readSensorData(ax, ay, az, gx, gy, gz);
+    case FIFO_16BIT: return readHardwareFIFO(ax, ay, az, gx, gy, gz);
+    case FIFO_20BIT_HIRES: return readHardwareFIFOHires(ax, ay, az, gx, gy, gz);
+    default: return false;
   }
 }
 
@@ -394,7 +390,7 @@ bool ICM42688P::readHardwareFIFO(float& ax, float& ay, float& az, float& gx, flo
   return true;
 }
 
-// [VOLTINO FIX] 100% FIXED PARSING LOGIC FOR 20-BIT DATA ACCORDING TO TDK DATASHEET!
+// [VOLTINO FIX] PERFEKTNÍ 20-BIT PARSOVÁNÍ PODLE TDK DATASHEETU
 bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx, float& gy, float& gz) {
   uint8_t countBuf[2];
   readRegisters(ICM42688_REG_FIFO_COUNTH, countBuf, 2);
@@ -407,26 +403,31 @@ bool ICM42688P::readHardwareFIFOHires(float& ax, float& ay, float& az, float& gx
 
   if ((buffer[0] & 0x80) != 0) return false;
 
-  // Composing from MSB, LSB and Extension Byte (20 bits total)
-  int32_t rawAx = (int32_t)((buffer[1] << 12) | (buffer[2] << 4) | (buffer[17] >> 4));
-  if (rawAx & 0x80000) rawAx |= 0xFFF00000; // Sign-extend for bit 19
+  // Extrakce 20-bit hodnot podle TDK Packet 4 (Byte 17, 18, 19 sdílejí bity)
+  // Byte 17 (0x11): Bity 7:4 = Gyro X [3:0], Bity 3:0 = Accel X [3:0]
+  // Byte 18 (0x12): Bity 7:4 = Gyro Y [3:0], Bity 3:0 = Accel Y [3:0]
+  // Byte 19 (0x13): Bity 7:4 = Gyro Z [3:0], Bity 3:0 = Accel Z [3:0]
 
-  int32_t rawAy = (int32_t)((buffer[3] << 12) | (buffer[4] << 4) | (buffer[17] & 0x0F));
+  int32_t rawAx = (int32_t)((buffer[1] << 12) | (buffer[2] << 4) | (buffer[17] & 0x0F));
+  if (rawAx & 0x80000) rawAx |= 0xFFF00000; // Sign-extend 20-bit to 32-bit
+
+  int32_t rawAy = (int32_t)((buffer[3] << 12) | (buffer[4] << 4) | (buffer[18] & 0x0F));
   if (rawAy & 0x80000) rawAy |= 0xFFF00000;
 
-  int32_t rawAz = (int32_t)((buffer[5] << 12) | (buffer[6] << 4) | (buffer[18] >> 4));
+  int32_t rawAz = (int32_t)((buffer[5] << 12) | (buffer[6] << 4) | (buffer[19] & 0x0F));
   if (rawAz & 0x80000) rawAz |= 0xFFF00000;
   
-  int32_t rawGx = (int32_t)((buffer[7] << 12) | (buffer[8] << 4) | (buffer[18] & 0x0F));
+  int32_t rawGx = (int32_t)((buffer[7] << 12) | (buffer[8] << 4) | (buffer[17] >> 4));
   if (rawGx & 0x80000) rawGx |= 0xFFF00000;
 
-  int32_t rawGy = (int32_t)((buffer[9] << 12) | (buffer[10] << 4) | (buffer[19] >> 4));
+  int32_t rawGy = (int32_t)((buffer[9] << 12) | (buffer[10] << 4) | (buffer[18] >> 4));
   if (rawGy & 0x80000) rawGy |= 0xFFF00000;
 
-  int32_t rawGz = (int32_t)((buffer[11] << 12) | (buffer[12] << 4) | (buffer[19] & 0x0F));
+  int32_t rawGz = (int32_t)((buffer[11] << 12) | (buffer[12] << 4) | (buffer[19] >> 4));
   if (rawGz & 0x80000) rawGz |= 0xFFF00000;
 
-  // Sensor in 20-bit mode automatically forces 16G and 2000DPS (2^19 = 524288)
+  // V 20-bit módu je senzor natvrdo v rozsazích 16G a 2000DPS.
+  // Maximum obou podepsaných (signed) 20-bit čísel je +/- 524288
   float scaleAccel20 = 16.0f / 524288.0f;
   float scaleGyro20  = 2000.0f / 524288.0f;
 

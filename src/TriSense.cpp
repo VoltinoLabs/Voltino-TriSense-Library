@@ -55,12 +55,62 @@ float TriSense::readAltitude(float seaLevelPressure) { return bmp.readAltitude(s
 
 TriSenseFusion::TriSenseFusion(ICM42688P* imu, AK09918C* mag) : _imu(imu), _mag(mag) {}
 
+void TriSenseFusion::trackUpdateRate() {
+  _updateCount++;
+  unsigned long now = millis();
+  if (now - _lastHzCheckTime >= 1000) {
+    if (_lastHzCheckTime > 0) {
+      _actualFusionHz = (float)_updateCount / ((now - _lastHzCheckTime) / 1000.0f);
+    }
+    _updateCount = 0;
+    _lastHzCheckTime = now;
+  }
+}
+
+float TriSenseFusion::getActualFusionHz() {
+  return _actualFusionHz;
+}
+
+FUSION_MATH_TYPE TriSenseFusion::invSqrt(FUSION_MATH_TYPE x) {
+#if defined(FORCE_FUSION_DOUBLE)
+  return 1.0 / sqrt(x);
+#else
+  float xhalf = 0.5f * (float)x;
+  uint32_t i = *(uint32_t*)&x;
+  i = 0x5f3759df - (i >> 1);
+  float y = *(float*)&i;
+  y = y * (1.5f - xhalf * y * y);
+  return (FUSION_MATH_TYPE)y;
+#endif
+}
+
 FUSION_MATH_TYPE TriSenseFusion::gaussianGain(FUSION_MATH_TYPE x, FUSION_MATH_TYPE mu, FUSION_MATH_TYPE sigma) {
   if (sigma == 0.0) return 0.0;
   FUSION_MATH_TYPE diff = x - mu;
   return exp(-(diff * diff) / ((FUSION_MATH_TYPE)2.0 * sigma * sigma));
 }
 
+void TriSenseFusion::setMountOrientation(TriSenseOrientation orientation) { _mountOrientation = orientation; }
+
+void TriSenseFusion::remapAxes(float& x, float& y, float& z) {
+  float tx = x, ty = y, tz = z;
+  switch (_mountOrientation) {
+    case ORIENTATION_X_UP:
+      x = -tz; y = ty; z = tx;  
+      break;
+    case ORIENTATION_Y_UP:
+      x = tx; y = -tz; z = ty;  
+      break;
+    case ORIENTATION_Z_DOWN:
+      x = -tx; y = ty; z = -tz;
+      break;
+    case ORIENTATION_Z_UP:
+    default:
+      break; 
+  }
+}
+
+void TriSenseFusion::setDynamicGyroBias(bool enable, float ki) { _dynamicBiasEnabled = enable; _biasKi = ki; }
 void TriSenseFusion::setAccelGaussian(float ref, float sigma) { accRef = ref; accSigma = sigma; }
 void TriSenseFusion::setMagGaussian(float ref, float sigma, float tiltSigma) { magRef = ref; magSigma = sigma; magTiltSigmaDeg = tiltSigma; }
 void TriSenseFusion::setMagGaussian(float ref, float sigma) { magRef = ref; magSigma = sigma; }
@@ -78,10 +128,6 @@ void TriSenseFusion::setMaxGains(float accelGain, float magGain) { maxAccelGain 
 void TriSenseFusion::setMagCheckInterval(float intervalMs) { magCheckIntervalUs = (unsigned long)(intervalMs * 1000.0f); }
 void TriSenseFusion::setLocalGravity(float g) { _localGravity = g; }
 
-// ====================================================================
-// [VOLTINO FIX] Smart Gravity Detection pro kalibraci akcelerometru.
-// Eliminuje vznik fantomových sil při kalibraci vzhůru nohama / na boku.
-// ====================================================================
 void TriSenseFusion::calibrateAccelStatic(int samples) {
   double sumX=0, sumY=0, sumZ=0; 
   int count = 0;
@@ -94,6 +140,7 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   while(count < samples) { 
     float ax, ay, az, gx, gy, gz;
     if (_imu->readFIFO(ax, ay, az, gx, gy, gz)) {
+      remapAxes(ax, ay, az);
       sumX += ax; sumY += ay; sumZ += az; 
       count++;
     } else {
@@ -105,24 +152,18 @@ void TriSenseFusion::calibrateAccelStatic(int samples) {
   float avgY = (float)(sumY / samples);
   float avgZ = (float)(sumZ / samples);
   
-  // Detekce osy, která nese nejvíce gravitace
   if (abs(avgZ) > 0.7f) {
-    accelOffset[0] = avgX;
-    accelOffset[1] = avgY;
+    accelOffset[0] = avgX; accelOffset[1] = avgY;
     accelOffset[2] = (avgZ > 0) ? (avgZ - 1.0f) : (avgZ + 1.0f);
   } else if (abs(avgX) > 0.7f) {
     accelOffset[0] = (avgX > 0) ? (avgX - 1.0f) : (avgX + 1.0f);
-    accelOffset[1] = avgY;
-    accelOffset[2] = avgZ;
+    accelOffset[1] = avgY; accelOffset[2] = avgZ;
   } else if (abs(avgY) > 0.7f) {
     accelOffset[0] = avgX;
     accelOffset[1] = (avgY > 0) ? (avgY - 1.0f) : (avgY + 1.0f);
     accelOffset[2] = avgZ;
   } else {
-    // Fallback: Pokud s modulem během kalibrace někdo třásl
-    accelOffset[0] = avgX;
-    accelOffset[1] = avgY;
-    accelOffset[2] = avgZ - 1.0f; 
+    accelOffset[0] = avgX; accelOffset[1] = avgY; accelOffset[2] = avgZ - 1.0f; 
   }
 }
 
@@ -142,14 +183,18 @@ void TriSenseFusion::initOrientation(int samples) {
      _mag->readData(); 
 
      if(imuReady) {
+         remapAxes(ax_raw, ay_raw, az_raw);
          FUSION_MATH_TYPE ax = ax_raw - accelOffset[0]; 
          FUSION_MATH_TYPE ay = ay_raw - accelOffset[1]; 
          FUSION_MATH_TYPE az = az_raw - accelOffset[2]; 
          axSum+=ax; aySum+=ay; azSum+=az;
          
-         FUSION_MATH_TYPE mx_raw = _mag->x - magHardIron[0]; 
-         FUSION_MATH_TYPE my_raw = _mag->y - magHardIron[1]; 
-         FUSION_MATH_TYPE mz_raw = _mag->z - magHardIron[2];
+         float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
+         remapAxes(mxr, myr, mzr);
+         
+         FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
+         FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
+         FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
          
          FUSION_MATH_TYPE mx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
          FUSION_MATH_TYPE my = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
@@ -214,13 +259,8 @@ void TriSenseFusion::getCorrectionAngles(FUSION_MATH_TYPE ax, FUSION_MATH_TYPE a
   if (yaw < 0) yaw += 360.0; if (yaw >= 360.0) yaw -= 360.0;
 }
 
-// ====================================================================
-// Rotates local sensor data to Global (Earth) axes (WORLD FRAME).
-// Z is always pointing up relative to gravity.
-// ====================================================================
 void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
   FUSION_MATH_TYPE qw = q[0], qx = q[1], qy = q[2], qz = q[3]; 
-  
   FUSION_MATH_TYPE xx = qx * qx, yy = qy * qy, zz = qz * qz;
   FUSION_MATH_TYPE xy = qx * qy, xz = qx * qz, yz = qy * qz;
   FUSION_MATH_TYPE wx = qw * qx, wy = qw * qy, wz = qw * qz;
@@ -230,41 +270,26 @@ void TriSenseFusion::getGlobalAcceleration(float& ax, float& ay, float& az, Acce
   FUSION_MATH_TYPE az_g = 2.0*(xz - wy) * lastAx + 2.0*(yz + wx) * lastAy + (1.0 - 2.0*(xx + yy)) * lastAz;
 
   if (unit == ACCEL_UNIT_MS2) {
-     ax = (float)(ax_g * _localGravity);
-     ay = (float)(ay_g * _localGravity);
-     az = (float)(az_g * _localGravity);
+     ax = (float)(ax_g * _localGravity); ay = (float)(ay_g * _localGravity); az = (float)(az_g * _localGravity);
   } else {
-     ax = (float)ax_g;
-     ay = (float)ay_g;
-     az = (float)az_g;
+     ax = (float)ax_g; ay = (float)ay_g; az = (float)az_g;
   }
 }
 
-// ====================================================================
-// Gets true linear acceleration in the sensor's BODY FRAME.
-// Perfect for CanSat: extracts pure rocket thrust independently of tilt.
-// ====================================================================
 void TriSenseFusion::getLinearAcceleration(float& ax, float& ay, float& az, AccelUnit unit) {
   FUSION_MATH_TYPE qw = q[0], qx = q[1], qy = q[2], qz = q[3]; 
-
-  // 1. Gravity (1G on Z) projected backwards into the local sensor axes (BODY FRAME)
   FUSION_MATH_TYPE grav_x = 2.0 * (qx * qz - qw * qy);
   FUSION_MATH_TYPE grav_y = 2.0 * (qw * qx + qy * qz);
   FUSION_MATH_TYPE grav_z = 1.0 - 2.0 * (qx * qx + qy * qy);
 
-  // 2. Subtract projected gravity from raw acceleration
   FUSION_MATH_TYPE lin_x = lastAx - grav_x;
   FUSION_MATH_TYPE lin_y = lastAy - grav_y;
   FUSION_MATH_TYPE lin_z = lastAz - grav_z;
 
   if (unit == ACCEL_UNIT_MS2) {
-     ax = (float)(lin_x * _localGravity);
-     ay = (float)(lin_y * _localGravity);
-     az = (float)(lin_z * _localGravity);
+     ax = (float)(lin_x * _localGravity); ay = (float)(lin_y * _localGravity); az = (float)(lin_z * _localGravity);
   } else {
-     ax = (float)lin_x;
-     ay = (float)lin_y;
-     az = (float)lin_z;
+     ax = (float)lin_x; ay = (float)lin_y; az = (float)lin_z;
   }
 }
 
@@ -275,27 +300,29 @@ void TriSenseFusion::gyroIntegration(FUSION_MATH_TYPE gx, FUSION_MATH_TYPE gy, F
   FUSION_MATH_TYPE qDot4 = 0.5 * (q[0] * gz + q[1] * gy - q[2] * gx);
   
   q[0] += qDot1 * dt; q[1] += qDot2 * dt; q[2] += qDot3 * dt; q[3] += qDot4 * dt;
-  FUSION_MATH_TYPE recipNorm = 1.0 / sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]); 
+  FUSION_MATH_TYPE recipNorm = invSqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]); 
   q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
 }
 
 SimpleTriFusion::SimpleTriFusion(ICM42688P* imu, AK09918C* mag) : TriSenseFusion(imu, mag) {}
 
+void SimpleTriFusion::enableLightweightGravity(bool enable, float kp) {
+  _lightweightGravityEnabled = enable;
+  _lightweightKp = kp;
+}
+
 bool SimpleTriFusion::update() {
   bool dataProcessed = false;
   
   if (_imu->getFIFOMode() == FIFO_NONE) {
-    // --- Direct register read mode (polling) ---
     float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
     if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
+      remapAxes(ax_raw, ay_raw, az_raw);
+      remapAxes(gx_raw, gy_raw, gz_raw);
       
-      lastAx = ax_raw - accelOffset[0]; 
-      lastAy = ay_raw - accelOffset[1]; 
-      lastAz = az_raw - accelOffset[2]; 
-      lastGx = gx_raw - gyroOffset[0];  
-      lastGy = gy_raw - gyroOffset[1];  
-      lastGz = gz_raw - gyroOffset[2];
+      lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2]; 
+      lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
       
       unsigned long nowMicros = micros();
       if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
@@ -304,35 +331,88 @@ bool SimpleTriFusion::update() {
       if (dt <= 0.0) dt = 0.00001;
       if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
       
-      gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
-                      lastGy * (FUSION_MATH_TYPE)PI/180.0, 
-                      lastGz * (FUSION_MATH_TYPE)PI/180.0, dt);
+      FUSION_MATH_TYPE gx_rad = lastGx * (FUSION_MATH_TYPE)PI/180.0;
+      FUSION_MATH_TYPE gy_rad = lastGy * (FUSION_MATH_TYPE)PI/180.0;
+      FUSION_MATH_TYPE gz_rad = lastGz * (FUSION_MATH_TYPE)PI/180.0;
+
+      if (_lightweightGravityEnabled) {
+          FUSION_MATH_TYPE norm = invSqrt(lastAx*lastAx + lastAy*lastAy + lastAz*lastAz);
+          FUSION_MATH_TYPE ax_n = lastAx * norm, ay_n = lastAy * norm, az_n = lastAz * norm;
+          FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
+          FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
+          FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
+          gx_rad += (FUSION_MATH_TYPE)_lightweightKp * (ay_n * grav_z - az_n * grav_y);
+          gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
+          gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
+      }
+      gyroIntegration(gx_rad, gy_rad, gz_rad, dt);
+      trackUpdateRate();
     }
   } else {
-    // --- FIFO mode: empty ALL available packets ---
-    int hz = _imu->getODRHz();
-    FUSION_MATH_TYPE dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
-    
-    while (true) {
-      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
-      if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
-        break; // FIFO empty
-      }
-      dataProcessed = true;
-      
-      lastAx = ax_raw - accelOffset[0]; 
-      lastAy = ay_raw - accelOffset[1]; 
-      lastAz = az_raw - accelOffset[2]; 
-      lastGx = gx_raw - gyroOffset[0];  
-      lastGy = gy_raw - gyroOffset[1];  
-      lastGz = gz_raw - gyroOffset[2];
-      
-      gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
-                      lastGy * (FUSION_MATH_TYPE)PI/180.0, 
-                      lastGz * (FUSION_MATH_TYPE)PI/180.0, dt);
+    // VOLTINO UPDATE: Perfect DT Array Logic
+    unsigned long nowMicros = micros();
+    if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+    FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+    _lastIntegrationTime = nowMicros;
+    if (total_dt <= 0.0) total_dt = 0.00001;
+
+    #if defined(__AVR__)
+      const int max_packets = 16;  // Ochrana RAM (jen 2KB SRAM) pro staré desky
+    #else
+      const int max_packets = 128; // RP2350 / ESP32 pojme s klidem plný ICM-42688 buffer
+    #endif
+
+    struct FIFOPacket { float ax, ay, az, gx, gy, gz; };
+    FIFOPacket buffer[max_packets];
+    int packetCount = 0;
+
+    while (packetCount < max_packets) {
+        float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+        if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) break; 
+        buffer[packetCount].ax = ax_raw; buffer[packetCount].ay = ay_raw; buffer[packetCount].az = az_raw;
+        buffer[packetCount].gx = gx_raw; buffer[packetCount].gy = gy_raw; buffer[packetCount].gz = gz_raw;
+        packetCount++;
+    }
+
+    if (packetCount > 0) {
+        dataProcessed = true;
+        FUSION_MATH_TYPE perfect_dt = total_dt / (FUSION_MATH_TYPE)packetCount;
+
+        // Ochrana proti zablokování OS - fallback na ideální frekvenci senzoru
+        int hz = _imu->getODRHz();
+        FUSION_MATH_TYPE max_dt = (hz > 0) ? (5.0 / (FUSION_MATH_TYPE)hz) : 0.05;
+        if (perfect_dt > max_dt) perfect_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
+
+        for(int i = 0; i < packetCount; i++) {
+            float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
+            float gx_raw = buffer[i].gx, gy_raw = buffer[i].gy, gz_raw = buffer[i].gz;
+
+            remapAxes(ax_raw, ay_raw, az_raw);
+            remapAxes(gx_raw, gy_raw, gz_raw);
+
+            lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
+            lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+
+            FUSION_MATH_TYPE gx_rad = lastGx * (FUSION_MATH_TYPE)PI/180.0;
+            FUSION_MATH_TYPE gy_rad = lastGy * (FUSION_MATH_TYPE)PI/180.0;
+            FUSION_MATH_TYPE gz_rad = lastGz * (FUSION_MATH_TYPE)PI/180.0;
+
+            if (_lightweightGravityEnabled) {
+                FUSION_MATH_TYPE norm = invSqrt(lastAx*lastAx + lastAy*lastAy + lastAz*lastAz);
+                FUSION_MATH_TYPE ax_n = lastAx * norm, ay_n = lastAy * norm, az_n = lastAz * norm;
+                FUSION_MATH_TYPE grav_x = 2.0 * (q[1] * q[3] - q[0] * q[2]);
+                FUSION_MATH_TYPE grav_y = 2.0 * (q[0] * q[1] + q[2] * q[3]);
+                FUSION_MATH_TYPE grav_z = q[0] * q[0] - q[1] * q[1] - q[2] * q[2] + q[3] * q[3];
+                gx_rad += (FUSION_MATH_TYPE)_lightweightKp * (ay_n * grav_z - az_n * grav_y);
+                gy_rad += (FUSION_MATH_TYPE)_lightweightKp * (az_n * grav_x - ax_n * grav_z);
+                gz_rad += (FUSION_MATH_TYPE)_lightweightKp * (ax_n * grav_y - ay_n * grav_x);
+            }
+            
+            gyroIntegration(gx_rad, gy_rad, gz_rad, perfect_dt);
+            trackUpdateRate();
+        }
     }
   }
-  
   return dataProcessed;
 }
 
@@ -342,7 +422,7 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
                                                 FUSION_MATH_TYPE mx, FUSION_MATH_TYPE my, FUSION_MATH_TYPE mz, 
                                                 FUSION_MATH_TYPE correction_dt) {
   FUSION_MATH_TYPE totalAccelG = sqrt(ax * ax + ay * ay + az * az); 
-  FUSION_MATH_TYPE recipNorm = 1.0 / totalAccelG; 
+  FUSION_MATH_TYPE recipNorm = invSqrt(ax * ax + ay * ay + az * az); 
   ax *= recipNorm; ay *= recipNorm; az *= recipNorm;
   
   FUSION_MATH_TYPE magStrength = sqrt(mx * mx + my * my + mz * mz);
@@ -358,13 +438,20 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   FUSION_MATH_TYPE final_accel_gain = g_gain_accel_raw * (FUSION_MATH_TYPE)maxAccelGain; 
   FUSION_MATH_TYPE final_mag_gain = g_gain_mag_raw * (FUSION_MATH_TYPE)maxMagGain;
   
-  FUSION_MATH_TYPE roll_rad, pitch_rad, yaw_rad; quaternionToEuler(roll_rad, pitch_rad, yaw_rad);
-  FUSION_MATH_TYPE tilt_gain_roll = gaussianGain(fabs(roll_rad * 180.0 / (FUSION_MATH_TYPE)PI), 0.0, (FUSION_MATH_TYPE)magTiltSigmaDeg); 
-  FUSION_MATH_TYPE tilt_gain_pitch = gaussianGain(fabs(pitch_rad * 180.0 / (FUSION_MATH_TYPE)PI), 0.0, (FUSION_MATH_TYPE)magTiltSigmaDeg);
-  final_mag_gain *= tilt_gain_roll * tilt_gain_pitch;
+  FUSION_MATH_TYPE tilt_rad_sq = 2.0 * (1.0 - vz);
+  if (tilt_rad_sq < 0.0) tilt_rad_sq = 0.0;
+  FUSION_MATH_TYPE tilt_deg_sq = tilt_rad_sq * 3282.806; 
+  
+  FUSION_MATH_TYPE tilt_gain = exp(-tilt_deg_sq / (2.0 * (FUSION_MATH_TYPE)magTiltSigmaDeg * (FUSION_MATH_TYPE)magTiltSigmaDeg));
+  final_mag_gain *= tilt_gain;
   
   FUSION_MATH_TYPE roll_corr, pitch_corr, yaw_corr; 
   getCorrectionAngles(ax * totalAccelG, ay * totalAccelG, az * totalAccelG, mx, my, mz, roll_corr, pitch_corr, yaw_corr);
+  
+  FUSION_MATH_TYPE siny_cosp = 2.0 * (q[0] * q[3] + q[1] * q[2]); 
+  FUSION_MATH_TYPE cosy_cosp = 1.0 - 2.0 * (q[2] * q[2] + q[3] * q[3]); 
+  FUSION_MATH_TYPE yaw_rad = atan2(siny_cosp, cosy_cosp);
+  
   FUSION_MATH_TYPE yaw_deg = yaw_rad * 180.0 / (FUSION_MATH_TYPE)PI; 
   if (yaw_deg < 0) yaw_deg += 360.0; if (yaw_deg >= 360.0) yaw_deg -= 360.0;
   
@@ -372,9 +459,14 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   if (delta_yaw_deg > 180.0) delta_yaw_deg -= 360.0; if (delta_yaw_deg < -180.0) delta_yaw_deg += 360.0;
   FUSION_MATH_TYPE delta_yaw_rad = delta_yaw_deg * (FUSION_MATH_TYPE)PI / 180.0;
   
-  if (lastDeltaYawRad * delta_yaw_rad < 0.0) gyroBiasZ = 0.0; 
+  if (lastDeltaYawRad * delta_yaw_rad < 0.0) gyroBias[2] = 0.0; 
   lastDeltaYawRad = delta_yaw_rad;
-  gyroBiasZ -= (FUSION_MATH_TYPE)yawKi * delta_yaw_rad * final_mag_gain * correction_dt;
+  
+  if (_dynamicBiasEnabled) {
+      gyroBias[0] -= (FUSION_MATH_TYPE)_biasKi * ex * final_accel_gain * correction_dt * 57.29578;
+      gyroBias[1] -= (FUSION_MATH_TYPE)_biasKi * ey * final_accel_gain * correction_dt * 57.29578;
+  }
+  gyroBias[2] -= (FUSION_MATH_TYPE)yawKi * delta_yaw_rad * final_mag_gain * correction_dt;
   
   FUSION_MATH_TYPE w_x = final_accel_gain * ex * correction_dt; 
   FUSION_MATH_TYPE w_y = final_accel_gain * ey * correction_dt; 
@@ -386,7 +478,7 @@ void AdvancedTriFusion::complementaryCorrection(FUSION_MATH_TYPE ax, FUSION_MATH
   q[2] += 0.5 * (q0_old * w_y - q1_old * w_z + q3_old * w_x); 
   q[3] += 0.5 * (q0_old * w_z + q1_old * w_y - q2_old * w_x);
   
-  recipNorm = 1.0 / sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]); 
+  recipNorm = invSqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]); 
   q[0] *= recipNorm; q[1] *= recipNorm; q[2] *= recipNorm; q[3] *= recipNorm;
 }
 
@@ -397,13 +489,11 @@ bool AdvancedTriFusion::update() {
     float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
     if (_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
       dataProcessed = true;
+      remapAxes(ax_raw, ay_raw, az_raw);
+      remapAxes(gx_raw, gy_raw, gz_raw);
       
-      lastAx = ax_raw - accelOffset[0]; 
-      lastAy = ay_raw - accelOffset[1]; 
-      lastAz = az_raw - accelOffset[2];
-      lastGx = gx_raw - gyroOffset[0]; 
-      lastGy = gy_raw - gyroOffset[1]; 
-      lastGz = gz_raw - gyroOffset[2];
+      lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
+      lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
       
       unsigned long nowMicros = micros();
       if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
@@ -412,75 +502,101 @@ bool AdvancedTriFusion::update() {
       if (dt <= 0.0) dt = 0.00001;
       if (dt > 0.1) dt = 1.0 / (FUSION_MATH_TYPE)(_imu->getODRHz() > 0 ? _imu->getODRHz() : 1000);
       
-      gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
-                      lastGy * (FUSION_MATH_TYPE)PI/180.0, 
-                      (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, 
-                      dt);
+      gyroIntegration((lastGx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0, 
+                      (lastGy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0, 
+                      (lastGz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, dt);
+      trackUpdateRate(); 
       
       unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;
         if (_mag->readData()) {
-          FUSION_MATH_TYPE mx_raw = _mag->x - magHardIron[0]; 
-          FUSION_MATH_TYPE my_raw = _mag->y - magHardIron[1]; 
-          FUSION_MATH_TYPE mz_raw = _mag->z - magHardIron[2];
+          float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
+          remapAxes(mxr, myr, mzr);
+          FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
+          FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
+          FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
           lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
           lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
           lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
           
           FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
           if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
-          
           complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
           lastSuccessfulCorrectionTime = now;
         }
       }
     }
   } else {
-    int hz = _imu->getODRHz();
-    FUSION_MATH_TYPE dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
-    
-    while (true) {
-      float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
-      if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) {
-        break; 
-      }
-      dataProcessed = true;
-      
-      lastAx = ax_raw - accelOffset[0]; 
-      lastAy = ay_raw - accelOffset[1]; 
-      lastAz = az_raw - accelOffset[2];
-      lastGx = gx_raw - gyroOffset[0]; 
-      lastGy = gy_raw - gyroOffset[1]; 
-      lastGz = gz_raw - gyroOffset[2];
-      
-      gyroIntegration(lastGx * (FUSION_MATH_TYPE)PI/180.0, 
-                      lastGy * (FUSION_MATH_TYPE)PI/180.0, 
-                      (lastGz - gyroBiasZ) * (FUSION_MATH_TYPE)PI/180.0, 
-                      dt);
+    // VOLTINO UPDATE: Perfect DT Array Logic pro Advanced Fusion
+    unsigned long nowMicros = micros();
+    if (_lastIntegrationTime == 0) _lastIntegrationTime = nowMicros;
+    FUSION_MATH_TYPE total_dt = (nowMicros - _lastIntegrationTime) / 1000000.0;
+    _lastIntegrationTime = nowMicros;
+    if (total_dt <= 0.0) total_dt = 0.00001;
+
+    #if defined(__AVR__)
+      const int max_packets = 16;
+    #else
+      const int max_packets = 128;
+    #endif
+
+    struct FIFOPacket { float ax, ay, az, gx, gy, gz; };
+    FIFOPacket buffer[max_packets];
+    int packetCount = 0;
+
+    while (packetCount < max_packets) {
+        float ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+        if (!_imu->readFIFO(ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw)) break; 
+        buffer[packetCount].ax = ax_raw; buffer[packetCount].ay = ay_raw; buffer[packetCount].az = az_raw;
+        buffer[packetCount].gx = gx_raw; buffer[packetCount].gy = gy_raw; buffer[packetCount].gz = gz_raw;
+        packetCount++;
     }
     
-    if (dataProcessed) {
+    if (packetCount > 0) {
+      dataProcessed = true;
+      FUSION_MATH_TYPE perfect_dt = total_dt / (FUSION_MATH_TYPE)packetCount;
+
+      int hz = _imu->getODRHz();
+      FUSION_MATH_TYPE max_dt = (hz > 0) ? (5.0 / (FUSION_MATH_TYPE)hz) : 0.05;
+      if (perfect_dt > max_dt) perfect_dt = (hz > 0) ? (1.0 / (FUSION_MATH_TYPE)hz) : 0.001;
+
+      for(int i = 0; i < packetCount; i++) {
+          float ax_raw = buffer[i].ax, ay_raw = buffer[i].ay, az_raw = buffer[i].az;
+          float gx_raw = buffer[i].gx, gy_raw = buffer[i].gy, gz_raw = buffer[i].gz;
+
+          remapAxes(ax_raw, ay_raw, az_raw);
+          remapAxes(gx_raw, gy_raw, gz_raw);
+
+          lastAx = ax_raw - accelOffset[0]; lastAy = ay_raw - accelOffset[1]; lastAz = az_raw - accelOffset[2];
+          lastGx = gx_raw - gyroOffset[0];  lastGy = gy_raw - gyroOffset[1];  lastGz = gz_raw - gyroOffset[2];
+
+          gyroIntegration((lastGx - gyroBias[0]) * (FUSION_MATH_TYPE)PI/180.0, 
+                          (lastGy - gyroBias[1]) * (FUSION_MATH_TYPE)PI/180.0, 
+                          (lastGz - gyroBias[2]) * (FUSION_MATH_TYPE)PI/180.0, perfect_dt);
+          trackUpdateRate();
+      }
+      
       unsigned long now = micros();
       if (now - lastMagCheckTime >= magCheckIntervalUs) {
         lastMagCheckTime = now;
         if (_mag->readData()) {
-          FUSION_MATH_TYPE mx_raw = _mag->x - magHardIron[0]; 
-          FUSION_MATH_TYPE my_raw = _mag->y - magHardIron[1]; 
-          FUSION_MATH_TYPE mz_raw = _mag->z - magHardIron[2];
+          float mxr = _mag->x, myr = _mag->y, mzr = _mag->z;
+          remapAxes(mxr, myr, mzr);
+          FUSION_MATH_TYPE mx_raw = mxr - magHardIron[0]; 
+          FUSION_MATH_TYPE my_raw = myr - magHardIron[1]; 
+          FUSION_MATH_TYPE mz_raw = mzr - magHardIron[2];
           lastMx = magSoftIron[0][0]*mx_raw + magSoftIron[0][1]*my_raw + magSoftIron[0][2]*mz_raw;
           lastMy = magSoftIron[1][0]*mx_raw + magSoftIron[1][1]*my_raw + magSoftIron[1][2]*mz_raw;
           lastMz = magSoftIron[2][0]*mx_raw + magSoftIron[2][1]*my_raw + magSoftIron[2][2]*mz_raw;
           
           FUSION_MATH_TYPE correction_dt = (now - lastSuccessfulCorrectionTime) / 1000000.0f;
           if (correction_dt > 0.1f || lastSuccessfulCorrectionTime == 0) correction_dt = 0.01f;
-          
           complementaryCorrection(lastAx, lastAy, lastAz, lastMx, lastMy, lastMz, correction_dt);
           lastSuccessfulCorrectionTime = now;
         }
       }
     }
   }
-  
   return dataProcessed;
 }
